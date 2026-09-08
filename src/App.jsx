@@ -289,6 +289,7 @@ export default function App() {
         dow: r.dow,
         checkin: r.checkin,
         checkout: r.checkout,
+        excused: !!r.excused,
       }))
     );
   }, []);
@@ -411,7 +412,39 @@ export default function App() {
     else fetchEmployees();
   }
 
-  /* ---- 저장된 월 데이터 삭제 ---- */
+  /* ---- 지각을 시간차감(연차/OT 사용)으로 처리 ---- */
+  async function excuseLate(employeeId, date, ledgerType, minutes, note) {
+    const { error: err } = await supabase
+      .from("attendance")
+      .update({ excused: true })
+      .eq("employee_id", employeeId)
+      .eq("date", date);
+    if (err) {
+      setError(`처리 실패: ${err.message}`);
+      return;
+    }
+    const ledgerRow = {
+      id: `L${Date.now()}`,
+      employee_id: employeeId,
+      type: ledgerType,
+      direction: "use",
+      minutes: Math.abs(parseInt(minutes, 10) || 0),
+      date,
+      note: note || "지각 시간차감 처리",
+    };
+    const { error: err2 } = await supabase.from("ledger").insert(ledgerRow);
+    if (err2) setError(`차감 기록 저장 실패: ${err2.message}`);
+    await Promise.all([fetchAttendance(), fetchLedger()]);
+  }
+  async function unexcuseLate(employeeId, date) {
+    const { error: err } = await supabase
+      .from("attendance")
+      .update({ excused: false })
+      .eq("employee_id", employeeId)
+      .eq("date", date);
+    if (err) setError(`처리 실패: ${err.message}`);
+    else fetchAttendance();
+  }
   async function deleteMonthData(month) {
     if (!window.confirm(`${month} 근태 데이터를 전부 삭제할까요? 되돌릴 수 없습니다.`)) return;
     const start = `${month}-01`;
@@ -465,31 +498,6 @@ export default function App() {
         if (insErr) throw insErr;
       }
 
-      const existingIds = new Set(employees.map((e) => e.id));
-      const existingNames = new Set(employees.map((e) => e.name));
-      const toAdd = [];
-      employeesFound.forEach((name, id) => {
-        if (!existingIds.has(id) && !existingNames.has(name)) {
-          toAdd.push(
-            empToRow({
-              id,
-              name,
-              team: "미지정",
-              position: "",
-              hireDate: "",
-              openingLeaveMinutes: 0,
-              openingOTMinutes: 0,
-              customSchedule: {},
-              active: true,
-            })
-          );
-        }
-      });
-      if (toAdd.length > 0) {
-        const { error: empErr } = await supabase.from("employees").insert(toAdd);
-        if (empErr) throw empErr;
-      }
-
       const logRow = {
         id: `U${Date.now()}`,
         file_name: file.name,
@@ -501,11 +509,16 @@ export default function App() {
       const { error: logErr } = await supabase.from("upload_log").insert(logRow);
       if (logErr) throw logErr;
 
-      await Promise.all([fetchAttendance(), fetchEmployees(), fetchUploadLog()]);
+      await Promise.all([fetchAttendance(), fetchUploadLog()]);
+
+      const knownNames = new Set(employees.map((e) => e.name));
+      const unknown = Array.from(employeesFound.values()).filter((name) => !knownNames.has(name));
 
       setUploadMsg(
         `${monthsSeen.join(", ")} 데이터를 통째로 교체했습니다 · 이번 업로드 ${records.length}건 반영 (기존 ${removedCount}건 삭제 후 재입력)` +
-          (toAdd.length > 0 ? ` · 신규 인원 ${toAdd.length}명 자동 추가됨(팀/입사일 입력 필요)` : "")
+          (unknown.length > 0
+            ? ` · 직원 명단에 없는 이름 ${unknown.length}명 발견(${unknown.join(", ")}) — 대시보드에는 표시되지 않으며, 필요하면 직원 관리 탭에서 직접 추가해주세요`
+            : "")
       );
     } catch (e) {
       setError(`업로드 처리 중 오류: ${e.message || e}`);
@@ -564,6 +577,27 @@ export default function App() {
     return Object.entries(map).sort((a, b) => b[0].localeCompare(a[0]));
   }, [attendance]);
 
+  const lateRecords = useMemo(() => {
+    if (!employees || !attendance) return [];
+    const out = [];
+    attendance.forEach((r) => {
+      const emp = employees.find((e) => e.id === r.employeeId || e.name === r.employeeName);
+      if (!emp) return;
+      const m = computeMetrics(r, emp);
+      if (m.late > 0) {
+        out.push({
+          rawEmployeeId: r.employeeId,
+          employeeCanonicalId: emp.id,
+          employeeName: emp.name,
+          date: r.date,
+          lateMinutes: m.late,
+          excused: !!r.excused,
+        });
+      }
+    });
+    return out.sort((a, b) => (a.date < b.date ? 1 : -1));
+  }, [employees, attendance]);
+
   const summaryRows = useMemo(() => {
     if (!employees || !ledger || !attendance) return [];
     return employees.map((emp) => {
@@ -579,7 +613,7 @@ export default function App() {
       empRecords.forEach((r) => {
         if (r.checkin) workedDays++;
         const m = computeMetrics(r, emp);
-        if (m.late > 0) {
+        if (m.late > 0 && !r.excused) {
           totalLateCount++;
           totalLateMinutes += m.late;
         }
@@ -716,6 +750,7 @@ export default function App() {
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {[
             ["dashboard", "대시보드"],
+            ["late", "지각 상세"],
             ["upload", "데이터 업로드"],
             ["ledger", "연차·OT 원장"],
             ["employees", "직원 관리"],
@@ -742,6 +777,9 @@ export default function App() {
 
       {tab === "dashboard" && (
         <DashboardTab groupedByTeam={groupedByTeam} collapsed={collapsed} toggleTeam={toggleTeam} />
+      )}
+      {tab === "late" && (
+        <LateDetailTab lateRecords={lateRecords} excuseLate={excuseLate} unexcuseLate={unexcuseLate} />
       )}
       {tab === "upload" && (
         <UploadTab
@@ -883,6 +921,98 @@ function Badge({ text, tone }) {
     <span style={{ fontWeight: 700, padding: "2px 8px", borderRadius: 5, background: c.bg, color: c.fg }}>
       {text}
     </span>
+  );
+}
+
+function LateDetailTab({ lateRecords, excuseLate, unexcuseLate }) {
+  const [editingKey, setEditingKey] = useState(null);
+  const [editType, setEditType] = useState("leave");
+  const [editMinutes, setEditMinutes] = useState("");
+
+  function startEdit(r) {
+    const key = `${r.rawEmployeeId}_${r.date}`;
+    setEditingKey(key);
+    setEditType("leave");
+    setEditMinutes(String(r.lateMinutes));
+  }
+  function confirmExcuse(r) {
+    excuseLate(r.rawEmployeeId, r.date, editType, editMinutes, "지각 시간차감 처리");
+    setEditingKey(null);
+  }
+
+  return (
+    <div className="card" style={{ overflow: "auto" }}>
+      <div style={{ fontSize: 12, color: COLORS.sub, marginBottom: 10 }}>
+        지각으로 잡힌 출근 기록 목록입니다. 사전에 승인되어 연차/OT로 시간차감 처리된 건은 "차감 처리"를
+        눌러주세요 — 대시보드의 지각 횟수·시간 집계에서 빠지고, 선택한 만큼 연차 또는 OT에서 차감됩니다.
+      </div>
+      <table>
+        <thead style={{ background: COLORS.tealSoft }}>
+          <tr>
+            <th>이름</th>
+            <th>날짜</th>
+            <th>지각시간</th>
+            <th>상태</th>
+            <th></th>
+          </tr>
+        </thead>
+        <tbody>
+          {lateRecords.length === 0 && (
+            <tr>
+              <td colSpan={5} style={{ textAlign: "center", color: COLORS.sub, padding: 20 }}>
+                지각 기록이 없습니다.
+              </td>
+            </tr>
+          )}
+          {lateRecords.map((r) => {
+            const key = `${r.rawEmployeeId}_${r.date}`;
+            const isEditing = editingKey === key;
+            return (
+              <tr key={key}>
+                <td style={{ fontWeight: 600 }}>{r.employeeName}</td>
+                <td>{fmtDate(r.date)}</td>
+                <td>{r.lateMinutes}분</td>
+                <td>
+                  {r.excused ? (
+                    <Badge text="차감 처리됨" tone="teal" />
+                  ) : (
+                    <Badge text="지각" tone="red" />
+                  )}
+                </td>
+                <td>
+                  {r.excused ? (
+                    <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px" }} onClick={() => unexcuseLate(r.rawEmployeeId, r.date)}>
+                      지각으로 되돌리기
+                    </button>
+                  ) : isEditing ? (
+                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                      <select className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={editType} onChange={(e) => setEditType(e.target.value)}>
+                        <option value="leave">연차에서 차감</option>
+                        <option value="ot">OT에서 차감</option>
+                      </select>
+                      <input
+                        type="number"
+                        className="input"
+                        style={{ padding: "4px 6px", fontSize: 12.5, width: 70 }}
+                        value={editMinutes}
+                        onChange={(e) => setEditMinutes(e.target.value)}
+                      />
+                      <span style={{ fontSize: 12, color: COLORS.sub }}>분</span>
+                      <button className="btn" style={{ background: COLORS.teal, color: "#fff", padding: "4px 10px" }} onClick={() => confirmExcuse(r)}>확인</button>
+                      <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px" }} onClick={() => setEditingKey(null)}>취소</button>
+                    </div>
+                  ) : (
+                    <button className="btn" style={{ background: COLORS.tealSoft, color: COLORS.tealDark, padding: "4px 10px" }} onClick={() => startEdit(r)}>
+                      차감 처리
+                    </button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </div>
   );
 }
 
