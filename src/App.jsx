@@ -36,11 +36,8 @@ const DAY_MINUTES = 480;
 
 const TEAM_ORDER = ["상담팀", "코디팀", "간호팀", "피부팀", "씨&마", "진료팀", "미지정"];
 const POSITION_LIST = ["원장", "실장", "팀장", "사원"];
-
-const SPECIAL_SCHEDULE = {
-  이보은: { customEnd: "18:00" },
-  홍보미: { customStart: "10:00" },
-};
+const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6];
+const WEEKDAY_LABELS = { 1: "월", 2: "화", 3: "수", 4: "목", 5: "금", 6: "토" };
 
 /* ───────────────────────── helpers ───────────────────────── */
 
@@ -129,11 +126,17 @@ function cumulativeLeaveDays(hireISO, asOfISO) {
   return { days: total, serviceYears: years, note: `근속 ${years}년차` };
 }
 
+function monthEndExclusive(month) {
+  const [y, m] = month.split("-").map(Number);
+  return toISO(new Date(y, m, 1));
+}
+
 function computeMetrics(record, employee) {
   const sched = SCHEDULE[record.dow];
   if (!sched) return { late: 0, otRaw: 0, otCredited: 0 };
-  const startStr = (employee && employee.customStart) || sched.start;
-  const endStr = (employee && employee.customEnd) || sched.end;
+  const custom = (employee && employee.customSchedule && employee.customSchedule[record.dow]) || {};
+  const startStr = custom.start || sched.start;
+  const endStr = custom.end || sched.end;
   let late = 0;
   if (record.checkin) {
     const inMin = timeToMinutes(record.checkin);
@@ -210,8 +213,7 @@ function empFromRow(row) {
     hireDate: row.hire_date || "",
     openingLeaveMinutes: row.opening_leave_minutes || 0,
     openingOTMinutes: row.opening_ot_minutes || 0,
-    customStart: row.custom_start || "",
-    customEnd: row.custom_end || "",
+    customSchedule: row.custom_schedule || {},
     active: row.active !== false,
   };
 }
@@ -224,8 +226,7 @@ function empToRow(e) {
     hire_date: e.hireDate || null,
     opening_leave_minutes: e.openingLeaveMinutes || 0,
     opening_ot_minutes: e.openingOTMinutes || 0,
-    custom_start: e.customStart || "",
-    custom_end: e.customEnd || "",
+    custom_schedule: e.customSchedule || {},
     active: e.active !== false,
   };
 }
@@ -264,7 +265,9 @@ export default function App() {
   const fetchEmployees = useCallback(async () => {
     const { data, error: err } = await supabase.from("employees").select("*").order("name");
     if (err) {
+      console.error("employees fetch error:", err);
       setError(`직원 목록을 불러오지 못했습니다: ${err.message}`);
+      setEmployees((prev) => prev || []);
       return;
     }
     setEmployees((data || []).map(empFromRow));
@@ -273,7 +276,9 @@ export default function App() {
   const fetchAttendance = useCallback(async () => {
     const { data, error: err } = await supabase.from("attendance").select("*");
     if (err) {
+      console.error("attendance fetch error:", err);
       setError(`근태 데이터를 불러오지 못했습니다: ${err.message}`);
+      setAttendance((prev) => prev || []);
       return;
     }
     setAttendance(
@@ -294,7 +299,9 @@ export default function App() {
       .select("*")
       .order("created_at", { ascending: false });
     if (err) {
+      console.error("ledger fetch error:", err);
       setError(`원장 데이터를 불러오지 못했습니다: ${err.message}`);
+      setLedger((prev) => prev || []);
       return;
     }
     setLedger(
@@ -317,7 +324,9 @@ export default function App() {
       .order("uploaded_at", { ascending: false })
       .limit(50);
     if (err) {
+      console.error("upload_log fetch error:", err);
       setError(`업로드 이력을 불러오지 못했습니다: ${err.message}`);
+      setUploadLog((prev) => prev || []);
       return;
     }
     setUploadLog(
@@ -331,6 +340,14 @@ export default function App() {
       }))
     );
   }, []);
+
+  function retryAll() {
+    setError("");
+    fetchEmployees();
+    fetchAttendance();
+    fetchLedger();
+    fetchUploadLog();
+  }
 
   useEffect(() => {
     if (!configOk) return;
@@ -363,8 +380,7 @@ export default function App() {
       hireDate: newHire,
       openingLeaveMinutes: 0,
       openingOTMinutes: 0,
-      customStart: "",
-      customEnd: "",
+      customSchedule: {},
       active: true,
     });
     const { error: err } = await supabase.from("employees").insert(row);
@@ -395,6 +411,20 @@ export default function App() {
     else fetchEmployees();
   }
 
+  /* ---- 저장된 월 데이터 삭제 ---- */
+  async function deleteMonthData(month) {
+    if (!window.confirm(`${month} 근태 데이터를 전부 삭제할까요? 되돌릴 수 없습니다.`)) return;
+    const start = `${month}-01`;
+    const endExclusive = monthEndExclusive(month);
+    const { error: err } = await supabase
+      .from("attendance")
+      .delete()
+      .gte("date", start)
+      .lt("date", endExclusive);
+    if (err) setError(`삭제 실패: ${err.message}`);
+    else fetchAttendance();
+  }
+
   /* ---- upload: 파일에 포함된 월을 통째로 교체 ---- */
   async function handleFile(file) {
     setUploadMsg("");
@@ -413,18 +443,18 @@ export default function App() {
       let removedCount = 0;
       for (const month of monthsSeen) {
         const start = `${month}-01`;
-        const end = `${month}-31`;
+        const endExclusive = monthEndExclusive(month);
         const { data: existing } = await supabase
           .from("attendance")
           .select("employee_id,date")
           .gte("date", start)
-          .lte("date", end);
+          .lt("date", endExclusive);
         removedCount += existing ? existing.length : 0;
         const { error: delErr } = await supabase
           .from("attendance")
           .delete()
           .gte("date", start)
-          .lte("date", end);
+          .lt("date", endExclusive);
         if (delErr) throw delErr;
       }
 
@@ -449,8 +479,7 @@ export default function App() {
               hireDate: "",
               openingLeaveMinutes: 0,
               openingOTMinutes: 0,
-              customStart: "",
-              customEnd: "",
+              customSchedule: {},
               active: true,
             })
           );
@@ -525,6 +554,15 @@ export default function App() {
     (employees || []).forEach((e) => (m[e.id] = e.name));
     return m;
   }, [employees]);
+
+  const monthsInData = useMemo(() => {
+    const map = {};
+    (attendance || []).forEach((r) => {
+      const m = r.date.slice(0, 7);
+      map[m] = (map[m] || 0) + 1;
+    });
+    return Object.entries(map).sort((a, b) => b[0].localeCompare(a[0]));
+  }, [attendance]);
 
   const summaryRows = useMemo(() => {
     if (!employees || !ledger || !attendance) return [];
@@ -610,7 +648,34 @@ export default function App() {
   }
 
   if (!employees || !attendance || !ledger || !uploadLog) {
-    return <div style={{ padding: 40, fontFamily: FONT, color: COLORS.sub }}>불러오는 중...</div>;
+    return (
+      <div style={{ padding: 40, fontFamily: FONT }}>
+        <div style={{ color: COLORS.sub, marginBottom: 12 }}>불러오는 중...</div>
+        {error && (
+          <div style={{ background: COLORS.redSoft, color: COLORS.red, padding: "10px 14px", borderRadius: 8, fontSize: 13.5, maxWidth: 560 }}>
+            {error}
+            <div style={{ marginTop: 8 }}>
+              <button
+                onClick={retryAll}
+                style={{
+                  marginTop: 4,
+                  cursor: "pointer",
+                  border: "none",
+                  borderRadius: 6,
+                  fontSize: 13,
+                  padding: "7px 14px",
+                  fontWeight: 600,
+                  background: COLORS.teal,
+                  color: "#fff",
+                }}
+              >
+                다시 시도
+              </button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
   }
 
   return (
@@ -654,7 +719,6 @@ export default function App() {
             ["upload", "데이터 업로드"],
             ["ledger", "연차·OT 원장"],
             ["employees", "직원 관리"],
-            ["settings", "규정 안내"],
           ].map(([key, label]) => (
             <div key={key} className={`tab ${tab === key ? "active" : ""}`} onClick={() => setTab(key)}>
               {label}
@@ -664,6 +728,9 @@ export default function App() {
         <div style={{ marginLeft: "auto", display: "flex", alignItems: "center", gap: 8 }}>
           <label style={{ fontSize: 12.5, color: COLORS.sub }}>기준일</label>
           <input type="date" className="input" value={asOf} onChange={(e) => setAsOf(e.target.value)} />
+          <button className="btn" style={{ background: COLORS.tealSoft, color: COLORS.tealDark }} onClick={retryAll}>
+            새로고침
+          </button>
         </div>
       </div>
 
@@ -684,6 +751,8 @@ export default function App() {
           uploadMsg={uploadMsg}
           uploadLog={uploadLog}
           uploading={uploading}
+          monthsInData={monthsInData}
+          deleteMonthData={deleteMonthData}
         />
       )}
       {tab === "ledger" && (
@@ -723,7 +792,6 @@ export default function App() {
           addEmployee={addEmployee}
         />
       )}
-      {tab === "settings" && <SettingsTab />}
     </div>
   );
 }
@@ -818,7 +886,7 @@ function Badge({ text, tone }) {
   );
 }
 
-function UploadTab({ fileRef, onFileInput, onDrop, uploadMsg, uploadLog, uploading }) {
+function UploadTab({ fileRef, onFileInput, onDrop, uploadMsg, uploadLog, uploading, monthsInData, deleteMonthData }) {
   return (
     <>
       <div
@@ -843,6 +911,42 @@ function UploadTab({ fileRef, onFileInput, onDrop, uploadMsg, uploadLog, uploadi
           {uploadMsg}
         </div>
       )}
+
+      <div className="card" style={{ marginBottom: 16 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10, color: COLORS.tealDark }}>저장된 월별 데이터</div>
+        <div style={{ fontSize: 12, color: COLORS.sub, marginBottom: 10 }}>
+          잘못 올렸거나 더 이상 필요 없는 달의 근태 데이터를 통째로 삭제할 수 있습니다. 삭제 후에는 되돌릴 수 없습니다.
+        </div>
+        <table>
+          <thead style={{ background: COLORS.tealSoft }}>
+            <tr>
+              <th>월</th>
+              <th>저장된 기록 수</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody>
+            {monthsInData.length === 0 && (
+              <tr>
+                <td colSpan={3} style={{ textAlign: "center", color: COLORS.sub, padding: 20 }}>
+                  저장된 근태 데이터가 없습니다.
+                </td>
+              </tr>
+            )}
+            {monthsInData.map(([month, count]) => (
+              <tr key={month}>
+                <td style={{ fontWeight: 600 }}>{month}</td>
+                <td>{count}건</td>
+                <td>
+                  <button className="btn" style={{ background: "transparent", color: COLORS.red, padding: "4px 8px" }} onClick={() => deleteMonthData(month)}>
+                    이 달 데이터 삭제
+                  </button>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
 
       <div className="card">
         <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 10, color: COLORS.tealDark }}>업로드 이력</div>
@@ -962,6 +1066,23 @@ function EmployeesTab({
   employees, updateEmployee, removeEmployee,
   newName, setNewName, newTeam, setNewTeam, newPosition, setNewPosition, newHire, setNewHire, addEmployee,
 }) {
+  const [expandedId, setExpandedId] = useState(null);
+
+  function setDaySchedule(emp, dow, field, value) {
+    const current = { ...(emp.customSchedule || {}) };
+    const dayEntry = { ...(current[dow] || {}) };
+    if (value) dayEntry[field] = value;
+    else delete dayEntry[field];
+    if (Object.keys(dayEntry).length === 0) delete current[dow];
+    else current[dow] = dayEntry;
+    updateEmployee(emp.id, { customSchedule: current });
+  }
+  function clearDay(emp, dow) {
+    const current = { ...(emp.customSchedule || {}) };
+    delete current[dow];
+    updateEmployee(emp.id, { customSchedule: current });
+  }
+
   return (
     <>
       <div className="card" style={{ marginBottom: 16 }}>
@@ -984,44 +1105,110 @@ function EmployeesTab({
           <thead style={{ background: COLORS.tealSoft }}>
             <tr>
               <th>이름</th><th>팀</th><th>직급</th><th>입사일</th>
-              <th>연차 초기값(분)</th><th>OT 초기값(분)</th><th>개인 출근기준</th><th>개인 퇴근기준</th><th></th>
+              <th>연차 초기값(분)</th><th>OT 초기값(분)</th><th>근무시간</th><th></th>
             </tr>
           </thead>
           <tbody>
-            {employees.map((e) => (
-              <tr key={e.id}>
-                <td style={{ fontWeight: 600 }}>{e.name}</td>
-                <td>
-                  <select className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={e.team || "미지정"} onChange={(ev) => updateEmployee(e.id, { team: ev.target.value })}>
-                    {TEAM_ORDER.map((t) => (<option key={t} value={t}>{t}</option>))}
-                  </select>
-                </td>
-                <td>
-                  <select className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={e.position || ""} onChange={(ev) => updateEmployee(e.id, { position: ev.target.value })}>
-                    <option value="">-</option>
-                    {POSITION_LIST.map((p) => (<option key={p} value={p}>{p}</option>))}
-                  </select>
-                </td>
-                <td>
-                  <input type="date" className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={e.hireDate} onChange={(ev) => updateEmployee(e.id, { hireDate: ev.target.value })} />
-                </td>
-                <td>
-                  <input type="number" className="input" style={{ padding: "4px 6px", fontSize: 12.5, width: 90 }} value={e.openingLeaveMinutes} onChange={(ev) => updateEmployee(e.id, { openingLeaveMinutes: parseInt(ev.target.value, 10) || 0 })} />
-                </td>
-                <td>
-                  <input type="number" className="input" style={{ padding: "4px 6px", fontSize: 12.5, width: 90 }} value={e.openingOTMinutes} onChange={(ev) => updateEmployee(e.id, { openingOTMinutes: parseInt(ev.target.value, 10) || 0 })} />
-                </td>
-                <td>
-                  <input type="time" className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={e.customStart || ""} onChange={(ev) => updateEmployee(e.id, { customStart: ev.target.value })} />
-                </td>
-                <td>
-                  <input type="time" className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={e.customEnd || ""} onChange={(ev) => updateEmployee(e.id, { customEnd: ev.target.value })} />
-                </td>
-                <td>
-                  <button className="btn" style={{ background: "transparent", color: COLORS.red, padding: "4px 8px" }} onClick={() => removeEmployee(e.id)}>삭제</button>
-                </td>
-              </tr>
-            ))}
+            {employees.map((e) => {
+              const hasCustom = e.customSchedule && Object.keys(e.customSchedule).length > 0;
+              const isOpen = expandedId === e.id;
+              return (
+                <React.Fragment key={e.id}>
+                  <tr>
+                    <td style={{ fontWeight: 600 }}>{e.name}</td>
+                    <td>
+                      <select className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={e.team || "미지정"} onChange={(ev) => updateEmployee(e.id, { team: ev.target.value })}>
+                        {TEAM_ORDER.map((t) => (<option key={t} value={t}>{t}</option>))}
+                      </select>
+                    </td>
+                    <td>
+                      <select className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={e.position || ""} onChange={(ev) => updateEmployee(e.id, { position: ev.target.value })}>
+                        <option value="">-</option>
+                        {POSITION_LIST.map((p) => (<option key={p} value={p}>{p}</option>))}
+                      </select>
+                    </td>
+                    <td>
+                      <input type="date" className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={e.hireDate} onChange={(ev) => updateEmployee(e.id, { hireDate: ev.target.value })} />
+                    </td>
+                    <td>
+                      <input type="number" className="input" style={{ padding: "4px 6px", fontSize: 12.5, width: 90 }} value={e.openingLeaveMinutes} onChange={(ev) => updateEmployee(e.id, { openingLeaveMinutes: parseInt(ev.target.value, 10) || 0 })} />
+                    </td>
+                    <td>
+                      <input type="number" className="input" style={{ padding: "4px 6px", fontSize: 12.5, width: 90 }} value={e.openingOTMinutes} onChange={(ev) => updateEmployee(e.id, { openingOTMinutes: parseInt(ev.target.value, 10) || 0 })} />
+                    </td>
+                    <td>
+                      <button
+                        className="btn"
+                        style={{ background: hasCustom ? COLORS.amberSoft : COLORS.tealSoft, color: hasCustom ? COLORS.amber : COLORS.tealDark, padding: "4px 10px" }}
+                        onClick={() => setExpandedId(isOpen ? null : e.id)}
+                      >
+                        {hasCustom ? "예외 설정됨" : "기본값 사용"} {isOpen ? "▲" : "▼"}
+                      </button>
+                    </td>
+                    <td>
+                      <button className="btn" style={{ background: "transparent", color: COLORS.red, padding: "4px 8px" }} onClick={() => removeEmployee(e.id)}>삭제</button>
+                    </td>
+                  </tr>
+                  {isOpen && (
+                    <tr>
+                      <td colSpan={8} style={{ background: COLORS.bg, padding: 14 }}>
+                        <div style={{ fontSize: 12.5, color: COLORS.sub, marginBottom: 8 }}>
+                          요일별로 이 직원만 다르게 적용할 출근/퇴근 시각을 입력하세요. 비워두면 회사 기본 시간표를 그대로 사용합니다.
+                        </div>
+                        <table>
+                          <thead>
+                            <tr>
+                              <th style={{ padding: "4px 8px" }}>요일</th>
+                              <th style={{ padding: "4px 8px" }}>기본값</th>
+                              <th style={{ padding: "4px 8px" }}>개인 출근</th>
+                              <th style={{ padding: "4px 8px" }}>개인 퇴근</th>
+                              <th style={{ padding: "4px 8px" }}></th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {WEEKDAY_ORDER.map((dow) => {
+                              const def = SCHEDULE[dow];
+                              const custom = (e.customSchedule && e.customSchedule[dow]) || {};
+                              return (
+                                <tr key={dow}>
+                                  <td style={{ padding: "4px 8px", fontWeight: 600 }}>{WEEKDAY_LABELS[dow]}</td>
+                                  <td style={{ padding: "4px 8px", color: COLORS.sub }}>{def.start}~{def.end}</td>
+                                  <td style={{ padding: "4px 8px" }}>
+                                    <input
+                                      type="time"
+                                      className="input"
+                                      style={{ padding: "4px 6px", fontSize: 12.5 }}
+                                      value={custom.start || ""}
+                                      onChange={(ev) => setDaySchedule(e, dow, "start", ev.target.value)}
+                                    />
+                                  </td>
+                                  <td style={{ padding: "4px 8px" }}>
+                                    <input
+                                      type="time"
+                                      className="input"
+                                      style={{ padding: "4px 6px", fontSize: 12.5 }}
+                                      value={custom.end || ""}
+                                      onChange={(ev) => setDaySchedule(e, dow, "end", ev.target.value)}
+                                    />
+                                  </td>
+                                  <td style={{ padding: "4px 8px" }}>
+                                    {(custom.start || custom.end) && (
+                                      <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "2px 8px", fontSize: 12 }} onClick={() => clearDay(e, dow)}>
+                                        기본값으로
+                                      </button>
+                                    )}
+                                  </td>
+                                </tr>
+                              );
+                            })}
+                          </tbody>
+                        </table>
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -1029,29 +1216,4 @@ function EmployeesTab({
   );
 }
 
-function SettingsTab() {
-  const row = (label, value) => (
-    <div style={{ display: "flex", padding: "10px 0", borderBottom: `1px solid ${COLORS.border}` }}>
-      <div style={{ width: 180, color: COLORS.sub, fontSize: 13 }}>{label}</div>
-      <div style={{ fontSize: 13.5 }}>{value}</div>
-    </div>
-  );
-  return (
-    <div className="card">
-      <div style={{ fontSize: 14, fontWeight: 700, color: COLORS.tealDark, marginBottom: 10 }}>적용 중인 규정</div>
-      {row("기본 근무시간", "월~목 09:30~19:00 · 금 09:30~21:00 · 토 09:30~16:00")}
-      {row("개인별 예외", "이보은 퇴근기준 18:00 · 홍보미 출근기준 10:00 (직원 관리 탭에서 추가/수정 가능)")}
-      {row("지각 기준", "각자 적용되는 출근기준시각 초과 시 지각, 유예시간 없음")}
-      {row("조기퇴근", "규정 종료시각보다 일찍 퇴근해도 OT·연차 차감 없음")}
-      {row("OT(연장근무) 계산", "종료시각 1분 초과부터 발생, 실제 초과분 × 1.5배(소수점 버림)로 적립 (예: 2분→3분, 3분→4분, 4분→6분)")}
-      {row("연차 발생", "근로기준법 표준 — 입사 1년 미만: 개근 월 1일(최대 11일) · 1년 이상: 15일 + 매 2년마다 1일 가산(최대 25일)")}
-      {row("연차 1일 환산", "8시간 = 480분")}
-      {row("데이터 저장", "Supabase 데이터베이스 (Netlify에서 배포)")}
-      {row("업로드 방식", "업로드한 파일에 포함된 월(달)의 기존 데이터를 전부 지우고 새로 반영 (완전 교체)")}
-      <div style={{ marginTop: 14, fontSize: 12, color: COLORS.sub }}>
-        ※ 규정이 바뀌면 src/App.jsx 상단의 SCHEDULE, OT_MULTIPLIER, DAY_MINUTES, SPECIAL_SCHEDULE 값만 수정하고
-        다시 배포(git push)하면 반영됩니다.
-      </div>
-    </div>
-  );
-}
+
