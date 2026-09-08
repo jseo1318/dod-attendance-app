@@ -35,6 +35,15 @@ const OT_MULTIPLIER = 1.5;
 const DAY_MINUTES = 480;
 
 const TEAM_ORDER = ["상담팀", "코디팀", "간호팀", "피부팀", "씨&마", "진료팀", "미지정"];
+const TEAM_COLORS = {
+  상담팀: "#5B4B63",
+  코디팀: "#0F5C55",
+  간호팀: "#3E5C76",
+  피부팀: "#55624A",
+  "씨&마": "#8B5E45",
+  진료팀: "#2E3A59",
+  미지정: "#5E6C68",
+};
 const POSITION_LIST = ["원장", "실장", "팀장", "사원"];
 const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6];
 const WEEKDAY_LABELS = { 1: "월", 2: "화", 3: "수", 4: "목", 5: "금", 6: "토" };
@@ -246,6 +255,7 @@ export default function App() {
   const [uploading, setUploading] = useState(false);
   const fileRef = useRef(null);
   const [collapsed, setCollapsed] = useState({});
+  const [selectedId, setSelectedId] = useState(null);
 
   const [ledgerEmp, setLedgerEmp] = useState("");
   const [ledgerType, setLedgerType] = useState("leave");
@@ -589,6 +599,7 @@ export default function App() {
           rawEmployeeId: r.employeeId,
           employeeCanonicalId: emp.id,
           employeeName: emp.name,
+          team: emp.team || "미지정",
           date: r.date,
           lateMinutes: m.late,
           excused: !!r.excused,
@@ -752,7 +763,7 @@ export default function App() {
             ["dashboard", "대시보드"],
             ["late", "지각 상세"],
             ["upload", "데이터 업로드"],
-            ["ledger", "연차·OT 원장"],
+            ["ledger", "연차·OT 사용내역"],
             ["employees", "직원 관리"],
           ].map(([key, label]) => (
             <div key={key} className={`tab ${tab === key ? "active" : ""}`} onClick={() => setTab(key)}>
@@ -776,7 +787,7 @@ export default function App() {
       )}
 
       {tab === "dashboard" && (
-        <DashboardTab groupedByTeam={groupedByTeam} collapsed={collapsed} toggleTeam={toggleTeam} />
+        <DashboardTab groupedByTeam={groupedByTeam} collapsed={collapsed} toggleTeam={toggleTeam} onSelect={setSelectedId} />
       )}
       {tab === "late" && (
         <LateDetailTab lateRecords={lateRecords} excuseLate={excuseLate} unexcuseLate={unexcuseLate} />
@@ -830,20 +841,30 @@ export default function App() {
           addEmployee={addEmployee}
         />
       )}
+
+      {selectedId && (
+        <EmployeeDetailModal
+          row={summaryRows.find((r) => r.id === selectedId)}
+          updateEmployee={updateEmployee}
+          removeEmployee={removeEmployee}
+          onClose={() => setSelectedId(null)}
+        />
+      )}
     </div>
   );
 }
 
 /* ───────────────────────── tabs ───────────────────────── */
 
-function DashboardTab({ groupedByTeam, collapsed, toggleTeam }) {
+function DashboardTab({ groupedByTeam, collapsed, toggleTeam, onSelect }) {
   return (
     <>
       {groupedByTeam.map(({ team, rows }) => {
         const isClosed = !!collapsed[team];
+        const teamColor = TEAM_COLORS[team] || COLORS.tealDark;
         return (
           <div key={team} style={{ marginBottom: 16 }}>
-            <div className="team-header" onClick={() => toggleTeam(team)}>
+            <div className="team-header" style={{ background: teamColor }} onClick={() => toggleTeam(team)}>
               <span className={`chevron ${isClosed ? "closed" : ""}`}>▾</span>
               {team} <span style={{ opacity: 0.75, fontWeight: 500 }}>· {rows.length}명</span>
             </div>
@@ -854,15 +875,11 @@ function DashboardTab({ groupedByTeam, collapsed, toggleTeam }) {
                     <tr>
                       <th>이름</th>
                       <th>직급</th>
-                      <th>근무일수</th>
                       <th>누적 지각횟수</th>
                       <th>누적 지각시간</th>
-                      <th>누적 OT 적립</th>
-                      <th>OT 사용</th>
                       <th>OT 잔여</th>
-                      <th>연차 발생</th>
-                      <th>연차 사용</th>
                       <th>연차 잔여</th>
+                      <th></th>
                     </tr>
                   </thead>
                   <tbody>
@@ -872,20 +889,31 @@ function DashboardTab({ groupedByTeam, collapsed, toggleTeam }) {
                       const leaveNeg = r.leaveRemaining < 0;
                       return (
                         <tr key={r.id}>
-                          <td style={{ fontWeight: 600 }}>{r.name}</td>
+                          <td>
+                            <button
+                              onClick={() => onSelect(r.id)}
+                              style={{
+                                background: "none",
+                                border: "none",
+                                cursor: "pointer",
+                                padding: 0,
+                                fontSize: 13,
+                                fontWeight: 700,
+                                color: COLORS.tealDark,
+                                textDecoration: "underline",
+                                textDecorationColor: COLORS.border,
+                                textUnderlineOffset: 3,
+                              }}
+                            >
+                              {r.name}
+                            </button>
+                          </td>
                           <td style={{ color: COLORS.sub }}>{r.position || "-"}</td>
-                          <td>{r.workedDays}</td>
                           <td>{r.totalLateCount}</td>
                           <td>{minutesToHM(r.totalLateMinutes)}</td>
-                          <td>{minutesToHM(r.totalOtEarned)}</td>
-                          <td>{minutesToHM(r.otUsed)}</td>
                           <td>
                             <Badge text={minutesToHM(r.otRemaining)} tone={otLow ? "red" : "teal"} />
                           </td>
-                          <td>
-                            {r.hireDate ? `${r.leaveCalc.days}일 (${minutesToDaysLabel(r.leaveEarnedMinutes)})` : "입사일 미입력"}
-                          </td>
-                          <td>{minutesToDaysLabel(r.leaveUsed)}</td>
                           <td>
                             {r.hireDate ? (
                               <Badge
@@ -893,8 +921,17 @@ function DashboardTab({ groupedByTeam, collapsed, toggleTeam }) {
                                 tone={leaveNeg ? "red" : leaveLow ? "amber" : "teal"}
                               />
                             ) : (
-                              "-"
+                              <span style={{ color: COLORS.sub, fontSize: 12 }}>입사일 미입력</span>
                             )}
+                          </td>
+                          <td>
+                            <button
+                              className="btn"
+                              style={{ background: COLORS.tealSoft, color: COLORS.tealDark, padding: "4px 10px" }}
+                              onClick={() => onSelect(r.id)}
+                            >
+                              상세 →
+                            </button>
                           </td>
                         </tr>
                       );
@@ -907,6 +944,185 @@ function DashboardTab({ groupedByTeam, collapsed, toggleTeam }) {
         );
       })}
     </>
+  );
+}
+
+function WeeklyScheduleEditor({ employee, updateEmployee }) {
+  function setDaySchedule(dow, field, value) {
+    const current = { ...(employee.customSchedule || {}) };
+    const dayEntry = { ...(current[dow] || {}) };
+    if (value) dayEntry[field] = value;
+    else delete dayEntry[field];
+    if (Object.keys(dayEntry).length === 0) delete current[dow];
+    else current[dow] = dayEntry;
+    updateEmployee(employee.id, { customSchedule: current });
+  }
+  function clearDay(dow) {
+    const current = { ...(employee.customSchedule || {}) };
+    delete current[dow];
+    updateEmployee(employee.id, { customSchedule: current });
+  }
+
+  return (
+    <>
+      <div style={{ fontSize: 12.5, color: COLORS.sub, marginBottom: 8 }}>
+        요일별로 이 직원만 다르게 적용할 출근/퇴근 시각을 입력하세요. 비워두면 회사 기본 시간표를 그대로 사용합니다.
+      </div>
+      <table>
+        <thead>
+          <tr>
+            <th style={{ padding: "4px 8px" }}>요일</th>
+            <th style={{ padding: "4px 8px" }}>기본값</th>
+            <th style={{ padding: "4px 8px" }}>개인 출근</th>
+            <th style={{ padding: "4px 8px" }}>개인 퇴근</th>
+            <th style={{ padding: "4px 8px" }}></th>
+          </tr>
+        </thead>
+        <tbody>
+          {WEEKDAY_ORDER.map((dow) => {
+            const def = SCHEDULE[dow];
+            const custom = (employee.customSchedule && employee.customSchedule[dow]) || {};
+            return (
+              <tr key={dow}>
+                <td style={{ padding: "4px 8px", fontWeight: 600 }}>{WEEKDAY_LABELS[dow]}</td>
+                <td style={{ padding: "4px 8px", color: COLORS.sub }}>{def.start}~{def.end}</td>
+                <td style={{ padding: "4px 8px" }}>
+                  <input
+                    type="time"
+                    className="input"
+                    style={{ padding: "4px 6px", fontSize: 12.5 }}
+                    value={custom.start || ""}
+                    onChange={(ev) => setDaySchedule(dow, "start", ev.target.value)}
+                  />
+                </td>
+                <td style={{ padding: "4px 8px" }}>
+                  <input
+                    type="time"
+                    className="input"
+                    style={{ padding: "4px 6px", fontSize: 12.5 }}
+                    value={custom.end || ""}
+                    onChange={(ev) => setDaySchedule(dow, "end", ev.target.value)}
+                  />
+                </td>
+                <td style={{ padding: "4px 8px" }}>
+                  {(custom.start || custom.end) && (
+                    <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "2px 8px", fontSize: 12 }} onClick={() => clearDay(dow)}>
+                      기본값으로
+                    </button>
+                  )}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
+    </>
+  );
+}
+
+function EmployeeDetailModal({ row, updateEmployee, removeEmployee, onClose }) {
+  if (!row) return null;
+  const otLow = row.otRemaining < 0;
+  const leaveLow = row.leaveRemaining <= DAY_MINUTES * 2 && row.leaveRemaining >= 0;
+  const leaveNeg = row.leaveRemaining < 0;
+  const teamColor = TEAM_COLORS[row.team] || COLORS.tealDark;
+
+  const stat = (label, value) => (
+    <div style={{ background: COLORS.bg, borderRadius: 8, padding: "10px 12px" }}>
+      <div style={{ fontSize: 11.5, color: COLORS.sub, marginBottom: 3 }}>{label}</div>
+      <div style={{ fontSize: 14.5, fontWeight: 700 }}>{value}</div>
+    </div>
+  );
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(10,20,18,0.45)",
+        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          background: "#fff", borderRadius: 14, width: "100%", maxWidth: 640,
+          maxHeight: "88vh", overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.25)",
+        }}
+      >
+        <div style={{ background: teamColor, color: "#fff", padding: "18px 22px", borderRadius: "14px 14px 0 0", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div>
+            <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 2 }}>{row.team} · {row.position || "직급 미지정"}</div>
+            <div style={{ fontSize: 20, fontWeight: 800 }}>{row.name}</div>
+          </div>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: 6, padding: "6px 10px", cursor: "pointer", fontSize: 13 }}>
+            닫기 ✕
+          </button>
+        </div>
+
+        <div style={{ padding: 22 }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3, 1fr)", gap: 10, marginBottom: 20 }}>
+            {stat("근무일수", `${row.workedDays}일`)}
+            {stat("누적 지각횟수", `${row.totalLateCount}회`)}
+            {stat("누적 지각시간", minutesToHM(row.totalLateMinutes))}
+            {stat("누적 OT 적립", minutesToHM(row.totalOtEarned))}
+            {stat("OT 사용", minutesToHM(row.otUsed))}
+            <div style={{ background: otLow ? COLORS.redSoft : COLORS.tealSoft, borderRadius: 8, padding: "10px 12px" }}>
+              <div style={{ fontSize: 11.5, color: otLow ? COLORS.red : COLORS.tealDark, marginBottom: 3 }}>OT 잔여</div>
+              <div style={{ fontSize: 14.5, fontWeight: 700, color: otLow ? COLORS.red : COLORS.tealDark }}>{minutesToHM(row.otRemaining)}</div>
+            </div>
+            {stat("연차 발생", row.hireDate ? `${row.leaveCalc.days}일` : "입사일 미입력")}
+            {stat("연차 사용", minutesToDaysLabel(row.leaveUsed))}
+            <div style={{ background: leaveNeg ? COLORS.redSoft : leaveLow ? COLORS.amberSoft : COLORS.tealSoft, borderRadius: 8, padding: "10px 12px" }}>
+              <div style={{ fontSize: 11.5, color: leaveNeg ? COLORS.red : leaveLow ? COLORS.amber : COLORS.tealDark, marginBottom: 3 }}>연차 잔여</div>
+              <div style={{ fontSize: 14.5, fontWeight: 700, color: leaveNeg ? COLORS.red : leaveLow ? COLORS.amber : COLORS.tealDark }}>
+                {row.hireDate ? minutesToDaysLabel(row.leaveRemaining) : "-"}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.tealDark, marginBottom: 10 }}>기본 정보 수정</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
+            <select className="input" value={row.team || "미지정"} onChange={(ev) => updateEmployee(row.id, { team: ev.target.value })}>
+              {TEAM_ORDER.map((t) => (<option key={t} value={t}>{t}</option>))}
+            </select>
+            <select className="input" value={row.position || ""} onChange={(ev) => updateEmployee(row.id, { position: ev.target.value })}>
+              <option value="">직급 -</option>
+              {POSITION_LIST.map((p) => (<option key={p} value={p}>{p}</option>))}
+            </select>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: COLORS.sub }}>
+              입사일
+              <input type="date" className="input" value={row.hireDate} onChange={(ev) => updateEmployee(row.id, { hireDate: ev.target.value })} />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: COLORS.sub }}>
+              연차 초기값(분)
+              <input type="number" className="input" style={{ width: 90 }} value={row.openingLeaveMinutes} onChange={(ev) => updateEmployee(row.id, { openingLeaveMinutes: parseInt(ev.target.value, 10) || 0 })} />
+            </label>
+            <label style={{ display: "flex", alignItems: "center", gap: 6, fontSize: 12.5, color: COLORS.sub }}>
+              OT 초기값(분)
+              <input type="number" className="input" style={{ width: 90 }} value={row.openingOTMinutes} onChange={(ev) => updateEmployee(row.id, { openingOTMinutes: parseInt(ev.target.value, 10) || 0 })} />
+            </label>
+          </div>
+
+          <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.tealDark, marginBottom: 10 }}>개인별 근무시간 예외</div>
+          <WeeklyScheduleEditor employee={row} updateEmployee={updateEmployee} />
+
+          <div style={{ marginTop: 20, borderTop: `1px solid ${COLORS.border}`, paddingTop: 14 }}>
+            <button
+              className="btn"
+              style={{ background: COLORS.redSoft, color: COLORS.red }}
+              onClick={() => {
+                if (window.confirm(`${row.name} 님을 직원 목록에서 삭제할까요?`)) {
+                  removeEmployee(row.id);
+                  onClose();
+                }
+              }}
+            >
+              직원 삭제
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
   );
 }
 
@@ -950,6 +1166,7 @@ function LateDetailTab({ lateRecords, excuseLate, unexcuseLate }) {
         <thead style={{ background: COLORS.tealSoft }}>
           <tr>
             <th>이름</th>
+            <th>팀</th>
             <th>날짜</th>
             <th>지각시간</th>
             <th>상태</th>
@@ -959,7 +1176,7 @@ function LateDetailTab({ lateRecords, excuseLate, unexcuseLate }) {
         <tbody>
           {lateRecords.length === 0 && (
             <tr>
-              <td colSpan={5} style={{ textAlign: "center", color: COLORS.sub, padding: 20 }}>
+              <td colSpan={6} style={{ textAlign: "center", color: COLORS.sub, padding: 20 }}>
                 지각 기록이 없습니다.
               </td>
             </tr>
@@ -970,6 +1187,7 @@ function LateDetailTab({ lateRecords, excuseLate, unexcuseLate }) {
             return (
               <tr key={key}>
                 <td style={{ fontWeight: 600 }}>{r.employeeName}</td>
+                <td style={{ color: COLORS.sub }}>{r.team}</td>
                 <td>{fmtDate(r.date)}</td>
                 <td>{r.lateMinutes}분</td>
                 <td>
@@ -1198,21 +1416,6 @@ function EmployeesTab({
 }) {
   const [expandedId, setExpandedId] = useState(null);
 
-  function setDaySchedule(emp, dow, field, value) {
-    const current = { ...(emp.customSchedule || {}) };
-    const dayEntry = { ...(current[dow] || {}) };
-    if (value) dayEntry[field] = value;
-    else delete dayEntry[field];
-    if (Object.keys(dayEntry).length === 0) delete current[dow];
-    else current[dow] = dayEntry;
-    updateEmployee(emp.id, { customSchedule: current });
-  }
-  function clearDay(emp, dow) {
-    const current = { ...(emp.customSchedule || {}) };
-    delete current[dow];
-    updateEmployee(emp.id, { customSchedule: current });
-  }
-
   return (
     <>
       <div className="card" style={{ marginBottom: 16 }}>
@@ -1282,57 +1485,7 @@ function EmployeesTab({
                   {isOpen && (
                     <tr>
                       <td colSpan={8} style={{ background: COLORS.bg, padding: 14 }}>
-                        <div style={{ fontSize: 12.5, color: COLORS.sub, marginBottom: 8 }}>
-                          요일별로 이 직원만 다르게 적용할 출근/퇴근 시각을 입력하세요. 비워두면 회사 기본 시간표를 그대로 사용합니다.
-                        </div>
-                        <table>
-                          <thead>
-                            <tr>
-                              <th style={{ padding: "4px 8px" }}>요일</th>
-                              <th style={{ padding: "4px 8px" }}>기본값</th>
-                              <th style={{ padding: "4px 8px" }}>개인 출근</th>
-                              <th style={{ padding: "4px 8px" }}>개인 퇴근</th>
-                              <th style={{ padding: "4px 8px" }}></th>
-                            </tr>
-                          </thead>
-                          <tbody>
-                            {WEEKDAY_ORDER.map((dow) => {
-                              const def = SCHEDULE[dow];
-                              const custom = (e.customSchedule && e.customSchedule[dow]) || {};
-                              return (
-                                <tr key={dow}>
-                                  <td style={{ padding: "4px 8px", fontWeight: 600 }}>{WEEKDAY_LABELS[dow]}</td>
-                                  <td style={{ padding: "4px 8px", color: COLORS.sub }}>{def.start}~{def.end}</td>
-                                  <td style={{ padding: "4px 8px" }}>
-                                    <input
-                                      type="time"
-                                      className="input"
-                                      style={{ padding: "4px 6px", fontSize: 12.5 }}
-                                      value={custom.start || ""}
-                                      onChange={(ev) => setDaySchedule(e, dow, "start", ev.target.value)}
-                                    />
-                                  </td>
-                                  <td style={{ padding: "4px 8px" }}>
-                                    <input
-                                      type="time"
-                                      className="input"
-                                      style={{ padding: "4px 6px", fontSize: 12.5 }}
-                                      value={custom.end || ""}
-                                      onChange={(ev) => setDaySchedule(e, dow, "end", ev.target.value)}
-                                    />
-                                  </td>
-                                  <td style={{ padding: "4px 8px" }}>
-                                    {(custom.start || custom.end) && (
-                                      <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "2px 8px", fontSize: 12 }} onClick={() => clearDay(e, dow)}>
-                                        기본값으로
-                                      </button>
-                                    )}
-                                  </td>
-                                </tr>
-                              );
-                            })}
-                          </tbody>
-                        </table>
+                        <WeeklyScheduleEditor employee={e} updateEmployee={updateEmployee} />
                       </td>
                     </tr>
                   )}
