@@ -845,6 +845,9 @@ export default function App() {
       {selectedId && (
         <EmployeeDetailModal
           row={summaryRows.find((r) => r.id === selectedId)}
+          lateRecords={lateRecords}
+          excuseLate={excuseLate}
+          unexcuseLate={unexcuseLate}
           updateEmployee={updateEmployee}
           removeEmployee={removeEmployee}
           onClose={() => setSelectedId(null)}
@@ -1020,12 +1023,13 @@ function WeeklyScheduleEditor({ employee, updateEmployee }) {
   );
 }
 
-function EmployeeDetailModal({ row, updateEmployee, removeEmployee, onClose }) {
+function EmployeeDetailModal({ row, lateRecords, excuseLate, unexcuseLate, updateEmployee, removeEmployee, onClose }) {
   if (!row) return null;
   const otLow = row.otRemaining < 0;
   const leaveLow = row.leaveRemaining <= DAY_MINUTES * 2 && row.leaveRemaining >= 0;
   const leaveNeg = row.leaveRemaining < 0;
   const teamColor = TEAM_COLORS[row.team] || COLORS.tealDark;
+  const personLateRecords = (lateRecords || []).filter((r) => r.employeeCanonicalId === row.id);
 
   const stat = (label, value) => (
     <div style={{ background: COLORS.bg, borderRadius: 8, padding: "10px 12px" }}>
@@ -1103,8 +1107,11 @@ function EmployeeDetailModal({ row, updateEmployee, removeEmployee, onClose }) {
             </label>
           </div>
 
-          <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.tealDark, marginBottom: 10 }}>개인별 근무시간 예외</div>
-          <WeeklyScheduleEditor employee={row} updateEmployee={updateEmployee} />
+          <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.tealDark, marginBottom: 10 }}>지각 히스토리</div>
+          <div style={{ fontSize: 12, color: COLORS.sub, marginBottom: 8 }}>
+            여기서 바로 차감 처리하거나 되돌릴 수 있습니다. 근무시간 예외 설정은 직원 관리 탭에서 계속 수정할 수 있어요.
+          </div>
+          <LateRecordsTable records={personLateRecords} excuseLate={excuseLate} unexcuseLate={unexcuseLate} showNameTeam={false} />
 
           <div style={{ marginTop: 20, borderTop: `1px solid ${COLORS.border}`, paddingTop: 14 }}>
             <button
@@ -1140,7 +1147,7 @@ function Badge({ text, tone }) {
   );
 }
 
-function LateDetailTab({ lateRecords, excuseLate, unexcuseLate }) {
+function LateRecordsTable({ records, excuseLate, unexcuseLate, showNameTeam = true }) {
   const [editingKey, setEditingKey] = useState(null);
   const [editType, setEditType] = useState("leave");
   const [editMinutes, setEditMinutes] = useState("");
@@ -1157,79 +1164,118 @@ function LateDetailTab({ lateRecords, excuseLate, unexcuseLate }) {
   }
 
   return (
+    <table>
+      <thead style={{ background: COLORS.tealSoft }}>
+        <tr>
+          {showNameTeam && <th>이름</th>}
+          {showNameTeam && <th>팀</th>}
+          <th>날짜</th>
+          <th>지각시간</th>
+          <th>상태</th>
+          <th></th>
+        </tr>
+      </thead>
+      <tbody>
+        {records.length === 0 && (
+          <tr>
+            <td colSpan={showNameTeam ? 6 : 4} style={{ textAlign: "center", color: COLORS.sub, padding: 20 }}>
+              지각 기록이 없습니다.
+            </td>
+          </tr>
+        )}
+        {records.map((r) => {
+          const key = `${r.rawEmployeeId}_${r.date}`;
+          const isEditing = editingKey === key;
+          return (
+            <tr key={key}>
+              {showNameTeam && <td style={{ fontWeight: 600 }}>{r.employeeName}</td>}
+              {showNameTeam && <td style={{ color: COLORS.sub }}>{r.team}</td>}
+              <td>{fmtDate(r.date)}</td>
+              <td>{r.lateMinutes}분</td>
+              <td>
+                {r.excused ? <Badge text="차감 처리됨" tone="teal" /> : <Badge text="지각" tone="red" />}
+              </td>
+              <td>
+                {r.excused ? (
+                  <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px" }} onClick={() => unexcuseLate(r.rawEmployeeId, r.date)}>
+                    지각으로 되돌리기
+                  </button>
+                ) : isEditing ? (
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                    <select className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={editType} onChange={(e) => setEditType(e.target.value)}>
+                      <option value="leave">연차에서 차감</option>
+                      <option value="ot">OT에서 차감</option>
+                    </select>
+                    <input
+                      type="number"
+                      className="input"
+                      style={{ padding: "4px 6px", fontSize: 12.5, width: 70 }}
+                      value={editMinutes}
+                      onChange={(e) => setEditMinutes(e.target.value)}
+                    />
+                    <span style={{ fontSize: 12, color: COLORS.sub }}>분</span>
+                    <button className="btn" style={{ background: COLORS.teal, color: "#fff", padding: "4px 10px" }} onClick={() => confirmExcuse(r)}>확인</button>
+                    <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px" }} onClick={() => setEditingKey(null)}>취소</button>
+                  </div>
+                ) : (
+                  <button className="btn" style={{ background: COLORS.tealSoft, color: COLORS.tealDark, padding: "4px 10px" }} onClick={() => startEdit(r)}>
+                    차감 처리
+                  </button>
+                )}
+              </td>
+            </tr>
+          );
+        })}
+      </tbody>
+    </table>
+  );
+}
+
+function LateDetailTab({ lateRecords, excuseLate, unexcuseLate }) {
+  const [query, setQuery] = useState("");
+  const [empFilter, setEmpFilter] = useState("");
+
+  const employeeOptions = useMemo(() => {
+    const names = new Map();
+    lateRecords.forEach((r) => names.set(r.employeeCanonicalId, r.employeeName));
+    return Array.from(names.entries()).sort((a, b) => a[1].localeCompare(b[1]));
+  }, [lateRecords]);
+
+  const filtered = useMemo(() => {
+    return lateRecords.filter((r) => {
+      if (empFilter && r.employeeCanonicalId !== empFilter) return false;
+      if (query && !r.employeeName.includes(query)) return false;
+      return true;
+    });
+  }, [lateRecords, empFilter, query]);
+
+  return (
     <div className="card" style={{ overflow: "auto" }}>
       <div style={{ fontSize: 12, color: COLORS.sub, marginBottom: 10 }}>
         지각으로 잡힌 출근 기록 목록입니다. 사전에 승인되어 연차/OT로 시간차감 처리된 건은 "차감 처리"를
         눌러주세요 — 대시보드의 지각 횟수·시간 집계에서 빠지고, 선택한 만큼 연차 또는 OT에서 차감됩니다.
       </div>
-      <table>
-        <thead style={{ background: COLORS.tealSoft }}>
-          <tr>
-            <th>이름</th>
-            <th>팀</th>
-            <th>날짜</th>
-            <th>지각시간</th>
-            <th>상태</th>
-            <th></th>
-          </tr>
-        </thead>
-        <tbody>
-          {lateRecords.length === 0 && (
-            <tr>
-              <td colSpan={6} style={{ textAlign: "center", color: COLORS.sub, padding: 20 }}>
-                지각 기록이 없습니다.
-              </td>
-            </tr>
-          )}
-          {lateRecords.map((r) => {
-            const key = `${r.rawEmployeeId}_${r.date}`;
-            const isEditing = editingKey === key;
-            return (
-              <tr key={key}>
-                <td style={{ fontWeight: 600 }}>{r.employeeName}</td>
-                <td style={{ color: COLORS.sub }}>{r.team}</td>
-                <td>{fmtDate(r.date)}</td>
-                <td>{r.lateMinutes}분</td>
-                <td>
-                  {r.excused ? (
-                    <Badge text="차감 처리됨" tone="teal" />
-                  ) : (
-                    <Badge text="지각" tone="red" />
-                  )}
-                </td>
-                <td>
-                  {r.excused ? (
-                    <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px" }} onClick={() => unexcuseLate(r.rawEmployeeId, r.date)}>
-                      지각으로 되돌리기
-                    </button>
-                  ) : isEditing ? (
-                    <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
-                      <select className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={editType} onChange={(e) => setEditType(e.target.value)}>
-                        <option value="leave">연차에서 차감</option>
-                        <option value="ot">OT에서 차감</option>
-                      </select>
-                      <input
-                        type="number"
-                        className="input"
-                        style={{ padding: "4px 6px", fontSize: 12.5, width: 70 }}
-                        value={editMinutes}
-                        onChange={(e) => setEditMinutes(e.target.value)}
-                      />
-                      <span style={{ fontSize: 12, color: COLORS.sub }}>분</span>
-                      <button className="btn" style={{ background: COLORS.teal, color: "#fff", padding: "4px 10px" }} onClick={() => confirmExcuse(r)}>확인</button>
-                      <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px" }} onClick={() => setEditingKey(null)}>취소</button>
-                    </div>
-                  ) : (
-                    <button className="btn" style={{ background: COLORS.tealSoft, color: COLORS.tealDark, padding: "4px 10px" }} onClick={() => startEdit(r)}>
-                      차감 처리
-                    </button>
-                  )}
-                </td>
-              </tr>
-            );
-          })}
-        </tbody>
-      </table>
+      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
+        <input
+          className="input"
+          placeholder="이름 검색"
+          value={query}
+          onChange={(e) => setQuery(e.target.value)}
+          style={{ width: 140 }}
+        />
+        <select className="input" value={empFilter} onChange={(e) => setEmpFilter(e.target.value)} style={{ width: 140 }}>
+          <option value="">전체 직원</option>
+          {employeeOptions.map(([id, name]) => (
+            <option key={id} value={id}>{name}</option>
+          ))}
+        </select>
+        {(query || empFilter) && (
+          <button className="btn" style={{ background: "transparent", color: COLORS.sub }} onClick={() => { setQuery(""); setEmpFilter(""); }}>
+            필터 초기화
+          </button>
+        )}
+      </div>
+      <LateRecordsTable records={filtered} excuseLate={excuseLate} unexcuseLate={unexcuseLate} showNameTeam />
     </div>
   );
 }
