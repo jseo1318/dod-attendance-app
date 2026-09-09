@@ -44,7 +44,7 @@ const TEAM_COLORS = {
   진료팀: "#2E3A59",
   미지정: "#5E6C68",
 };
-const POSITION_LIST = ["원장", "실장", "팀장", "사원"];
+const POSITION_LIST = ["원장", "실장", "팀장", "부팀장", "사원"];
 const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6];
 const WEEKDAY_LABELS = { 1: "월", 2: "화", 3: "수", 4: "목", 5: "금", 6: "토" };
 
@@ -434,7 +434,7 @@ export default function App() {
       return;
     }
     const ledgerRow = {
-      id: `L${Date.now()}`,
+      id: `LATE_${employeeId}_${date}`,
       employee_id: employeeId,
       type: ledgerType,
       direction: "use",
@@ -442,7 +442,7 @@ export default function App() {
       date,
       note: note || "지각 시간차감 처리",
     };
-    const { error: err2 } = await supabase.from("ledger").insert(ledgerRow);
+    const { error: err2 } = await supabase.from("ledger").upsert(ledgerRow, { onConflict: "id" });
     if (err2) setError(`차감 기록 저장 실패: ${err2.message}`);
     await Promise.all([fetchAttendance(), fetchLedger()]);
   }
@@ -452,8 +452,13 @@ export default function App() {
       .update({ excused: false })
       .eq("employee_id", employeeId)
       .eq("date", date);
-    if (err) setError(`처리 실패: ${err.message}`);
-    else fetchAttendance();
+    if (err) {
+      setError(`처리 실패: ${err.message}`);
+      return;
+    }
+    const { error: err2 } = await supabase.from("ledger").delete().eq("id", `LATE_${employeeId}_${date}`);
+    if (err2) setError(`차감 기록 삭제 실패: ${err2.message}`);
+    await Promise.all([fetchAttendance(), fetchLedger()]);
   }
   async function deleteMonthData(month) {
     if (!window.confirm(`${month} 근태 데이터를 전부 삭제할까요? 되돌릴 수 없습니다.`)) return;
@@ -848,6 +853,8 @@ export default function App() {
           lateRecords={lateRecords}
           excuseLate={excuseLate}
           unexcuseLate={unexcuseLate}
+          ledger={ledger}
+          removeLedgerEntry={removeLedgerEntry}
           updateEmployee={updateEmployee}
           removeEmployee={removeEmployee}
           onClose={() => setSelectedId(null)}
@@ -1023,17 +1030,31 @@ function WeeklyScheduleEditor({ employee, updateEmployee }) {
   );
 }
 
-function EmployeeDetailModal({ row, lateRecords, excuseLate, unexcuseLate, updateEmployee, removeEmployee, onClose }) {
+function EmployeeDetailModal({ row, lateRecords, excuseLate, unexcuseLate, ledger, removeLedgerEntry, updateEmployee, removeEmployee, onClose }) {
+  const [expandedStat, setExpandedStat] = useState(null); // null | 'ot' | 'leave'
   if (!row) return null;
   const otLow = row.otRemaining < 0;
   const leaveLow = row.leaveRemaining <= DAY_MINUTES * 2 && row.leaveRemaining >= 0;
   const leaveNeg = row.leaveRemaining < 0;
   const teamColor = TEAM_COLORS[row.team] || COLORS.tealDark;
   const personLateRecords = (lateRecords || []).filter((r) => r.employeeCanonicalId === row.id);
+  const statHistory = (ledger || [])
+    .filter((l) => l.employeeId === row.id && l.type === expandedStat)
+    .sort((a, b) => (a.date < b.date ? 1 : -1));
 
-  const stat = (label, value) => (
-    <div style={{ background: COLORS.bg, borderRadius: 8, padding: "10px 12px" }}>
-      <div style={{ fontSize: 11.5, color: COLORS.sub, marginBottom: 3 }}>{label}</div>
+  const stat = (label, value, onClick) => (
+    <div
+      onClick={onClick}
+      style={{
+        background: COLORS.bg, borderRadius: 8, padding: "10px 12px",
+        cursor: onClick ? "pointer" : "default",
+        border: onClick ? `1px solid ${COLORS.border}` : "1px solid transparent",
+      }}
+    >
+      <div style={{ fontSize: 11.5, color: COLORS.sub, marginBottom: 3, display: "flex", justifyContent: "space-between" }}>
+        <span>{label}</span>
+        {onClick && <span style={{ color: COLORS.teal }}>내역 ▸</span>}
+      </div>
       <div style={{ fontSize: 14.5, fontWeight: 700 }}>{value}</div>
     </div>
   );
@@ -1069,13 +1090,13 @@ function EmployeeDetailModal({ row, lateRecords, excuseLate, unexcuseLate, updat
             {stat("누적 지각횟수", `${row.totalLateCount}회`)}
             {stat("누적 지각시간", minutesToHM(row.totalLateMinutes))}
             {stat("누적 OT 적립", minutesToHM(row.totalOtEarned))}
-            {stat("OT 사용", minutesToHM(row.otUsed))}
+            {stat("OT 사용", minutesToHM(row.otUsed), () => setExpandedStat(expandedStat === "ot" ? null : "ot"))}
             <div style={{ background: otLow ? COLORS.redSoft : COLORS.tealSoft, borderRadius: 8, padding: "10px 12px" }}>
               <div style={{ fontSize: 11.5, color: otLow ? COLORS.red : COLORS.tealDark, marginBottom: 3 }}>OT 잔여</div>
               <div style={{ fontSize: 14.5, fontWeight: 700, color: otLow ? COLORS.red : COLORS.tealDark }}>{minutesToHM(row.otRemaining)}</div>
             </div>
             {stat("연차 발생", row.hireDate ? `${row.leaveCalc.days}일` : "입사일 미입력")}
-            {stat("연차 사용", minutesToDaysLabel(row.leaveUsed))}
+            {stat("연차 사용", minutesToDaysLabel(row.leaveUsed), () => setExpandedStat(expandedStat === "leave" ? null : "leave"))}
             <div style={{ background: leaveNeg ? COLORS.redSoft : leaveLow ? COLORS.amberSoft : COLORS.tealSoft, borderRadius: 8, padding: "10px 12px" }}>
               <div style={{ fontSize: 11.5, color: leaveNeg ? COLORS.red : leaveLow ? COLORS.amber : COLORS.tealDark, marginBottom: 3 }}>연차 잔여</div>
               <div style={{ fontSize: 14.5, fontWeight: 700, color: leaveNeg ? COLORS.red : leaveLow ? COLORS.amber : COLORS.tealDark }}>
@@ -1084,6 +1105,46 @@ function EmployeeDetailModal({ row, lateRecords, excuseLate, unexcuseLate, updat
             </div>
           </div>
 
+          {expandedStat && (
+            <div style={{ marginBottom: 20, border: `1px solid ${COLORS.border}`, borderRadius: 8, overflow: "hidden" }}>
+              <div style={{ background: COLORS.tealSoft, color: COLORS.tealDark, padding: "8px 12px", fontSize: 12.5, fontWeight: 700 }}>
+                {expandedStat === "ot" ? "OT 사용/조정 내역" : "연차 사용/조정 내역"}
+              </div>
+              <table>
+                <thead>
+                  <tr>
+                    <th style={{ padding: "6px 10px" }}>날짜</th>
+                    <th style={{ padding: "6px 10px" }}>구분</th>
+                    <th style={{ padding: "6px 10px" }}>분</th>
+                    <th style={{ padding: "6px 10px" }}>메모</th>
+                    <th style={{ padding: "6px 10px" }}></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {statHistory.length === 0 && (
+                    <tr>
+                      <td colSpan={5} style={{ padding: 16, textAlign: "center", color: COLORS.sub }}>
+                        내역이 없습니다.
+                      </td>
+                    </tr>
+                  )}
+                  {statHistory.map((l) => (
+                    <tr key={l.id}>
+                      <td style={{ padding: "6px 10px" }}>{fmtDate(l.date)}</td>
+                      <td style={{ padding: "6px 10px" }}>{l.direction === "use" ? "사용" : "조정(+)"}</td>
+                      <td style={{ padding: "6px 10px" }}>{l.minutes}분</td>
+                      <td style={{ padding: "6px 10px", color: COLORS.sub }}>{l.note || "-"}</td>
+                      <td style={{ padding: "6px 10px" }}>
+                        <button className="btn" style={{ background: "transparent", color: COLORS.red, padding: "3px 8px", fontSize: 12 }} onClick={() => removeLedgerEntry(l.id)}>
+                          삭제
+                        </button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
           <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.tealDark, marginBottom: 10 }}>기본 정보 수정</div>
           <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 18 }}>
             <select className="input" value={row.team || "미지정"} onChange={(ev) => updateEmployee(row.id, { team: ev.target.value })}>
@@ -1162,6 +1223,13 @@ function LateRecordsTable({ records, excuseLate, unexcuseLate, showNameTeam = tr
     excuseLate(r.rawEmployeeId, r.date, editType, editMinutes, "지각 시간차감 처리");
     setEditingKey(null);
   }
+  function handleStatusChange(r, value) {
+    if (value === "excused") startEdit(r);
+    else {
+      setEditingKey(null);
+      unexcuseLate(r.rawEmployeeId, r.date);
+    }
+  }
 
   return (
     <table>
@@ -1172,7 +1240,7 @@ function LateRecordsTable({ records, excuseLate, unexcuseLate, showNameTeam = tr
           <th>날짜</th>
           <th>지각시간</th>
           <th>상태</th>
-          <th></th>
+          <th>차감 설정</th>
         </tr>
       </thead>
       <tbody>
@@ -1193,14 +1261,18 @@ function LateRecordsTable({ records, excuseLate, unexcuseLate, showNameTeam = tr
               <td>{fmtDate(r.date)}</td>
               <td>{r.lateMinutes}분</td>
               <td>
-                {r.excused ? <Badge text="차감 처리됨" tone="teal" /> : <Badge text="지각" tone="red" />}
+                <select
+                  className="input"
+                  style={{ padding: "4px 6px", fontSize: 12.5, fontWeight: 700, color: r.excused ? COLORS.tealDark : COLORS.red }}
+                  value={r.excused ? "excused" : "late"}
+                  onChange={(e) => handleStatusChange(r, e.target.value)}
+                >
+                  <option value="late">지각</option>
+                  <option value="excused">차감 처리</option>
+                </select>
               </td>
               <td>
-                {r.excused ? (
-                  <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px" }} onClick={() => unexcuseLate(r.rawEmployeeId, r.date)}>
-                    지각으로 되돌리기
-                  </button>
-                ) : isEditing ? (
+                {isEditing ? (
                   <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                     <select className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={editType} onChange={(e) => setEditType(e.target.value)}>
                       <option value="leave">연차에서 차감</option>
@@ -1215,12 +1287,20 @@ function LateRecordsTable({ records, excuseLate, unexcuseLate, showNameTeam = tr
                     />
                     <span style={{ fontSize: 12, color: COLORS.sub }}>분</span>
                     <button className="btn" style={{ background: COLORS.teal, color: "#fff", padding: "4px 10px" }} onClick={() => confirmExcuse(r)}>확인</button>
-                    <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px" }} onClick={() => setEditingKey(null)}>취소</button>
+                    <button
+                      className="btn"
+                      style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px" }}
+                      onClick={() => setEditingKey(null)}
+                    >
+                      취소
+                    </button>
                   </div>
-                ) : (
-                  <button className="btn" style={{ background: COLORS.tealSoft, color: COLORS.tealDark, padding: "4px 10px" }} onClick={() => startEdit(r)}>
-                    차감 처리
+                ) : r.excused ? (
+                  <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px" }} onClick={() => startEdit(r)}>
+                    차감 내용 수정
                   </button>
+                ) : (
+                  <span style={{ color: COLORS.sub, fontSize: 12 }}>-</span>
                 )}
               </td>
             </tr>
