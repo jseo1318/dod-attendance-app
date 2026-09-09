@@ -660,7 +660,7 @@ export default function App() {
 
       let totalLateCount = 0;
       let totalLateMinutes = 0;
-      let totalOtEarned = 0;
+      let totalOtRaw = 0;
       let workedDays = 0;
       empRecords.forEach((r) => {
         if (r.checkin) workedDays++;
@@ -669,8 +669,11 @@ export default function App() {
           totalLateCount++;
           totalLateMinutes += m.late;
         }
-        totalOtEarned += m.otCredited;
+        totalOtRaw += m.otRaw;
       });
+      // 매일 개별적으로 1.5배 후 버림 처리하면 소수점이 매일 손실되므로,
+      // 원본 OT 분(raw)을 전체 기간 합산한 뒤 마지막에 한 번만 1.5배 적용
+      const totalOtEarned = Math.floor(totalOtRaw * OT_MULTIPLIER);
 
       const otUsed = empLedger
         .filter((l) => l.type === "ot" && l.direction === "use")
@@ -1485,7 +1488,7 @@ function LateRecordsTable({ records, ledger, setLateExcused, setLateDeduction, r
               <td>
                 <select
                   className="input"
-                  style={{ padding: "4px 6px", fontSize: 12.5, fontWeight: 700, color: r.excused ? COLORS.tealDark : COLORS.red }}
+                  style={{ padding: "4px 6px", fontSize: 12.5, fontWeight: 700, color: r.excused ? COLORS.teal : COLORS.red }}
                   value={r.excused ? "excused" : "late"}
                   onChange={(e) => setLateExcused(r.rawEmployeeId, r.date, e.target.value === "excused")}
                 >
