@@ -257,6 +257,8 @@ export default function App() {
   const fileRef = useRef(null);
   const [collapsed, setCollapsed] = useState({});
   const [selectedId, setSelectedId] = useState(null);
+  const [session, setSession] = useState(undefined); // undefined = loading, null = logged out
+  const [showLogin, setShowLogin] = useState(false);
 
   const [ledgerEmp, setLedgerEmp] = useState("");
   const [ledgerType, setLedgerType] = useState("leave");
@@ -362,6 +364,23 @@ export default function App() {
   }
 
   useEffect(() => {
+    supabase.auth.getSession().then(({ data }) => setSession(data.session));
+    const { data: listener } = supabase.auth.onAuthStateChange((_event, newSession) => {
+      setSession(newSession);
+    });
+    return () => listener.subscription.unsubscribe();
+  }, []);
+
+  function requireAuth() {
+    if (!session) {
+      setError("로그인이 필요한 작업입니다. 우측 상단에서 관리자 로그인 해주세요.");
+      setShowLogin(true);
+      return false;
+    }
+    return true;
+  }
+
+  useEffect(() => {
     if (!configOk) return;
     fetchEmployees();
     fetchAttendance();
@@ -383,6 +402,7 @@ export default function App() {
 
   /* ---- employees ---- */
   async function addEmployee() {
+    if (!requireAuth()) return;
     if (!newName.trim()) return;
     const row = empToRow({
       id: `${newName.trim()}_${Date.now()}`,
@@ -405,6 +425,7 @@ export default function App() {
   }
 
   async function updateEmployee(id, patch) {
+    if (!requireAuth()) return;
     const emp = employees.find((e) => e.id === id);
     const merged = { ...emp, ...patch };
     const dbPatch = empToRow(merged);
@@ -418,6 +439,7 @@ export default function App() {
   }
 
   async function removeEmployee(id) {
+    if (!requireAuth()) return;
     const { error: err } = await supabase.from("employees").delete().eq("id", id);
     if (err) setError(`직원 삭제 실패: ${err.message}`);
     else fetchEmployees();
@@ -426,6 +448,7 @@ export default function App() {
   /* ---- 지각을 시간차감(연차/OT 사용)으로 처리 ---- */
   /* 지각 카운트 포함 여부와 차감(연차/OT) 처리는 서로 독립적으로 관리 */
   async function setLateExcused(employeeId, date, excused) {
+    if (!requireAuth()) return;
     const { error: err } = await supabase
       .from("attendance")
       .update({ excused })
@@ -435,6 +458,7 @@ export default function App() {
     else fetchAttendance();
   }
   async function setLateDeduction(employeeId, date, ledgerType, minutes, note) {
+    if (!requireAuth()) return;
     const ledgerRow = {
       id: `LATE_${employeeId}_${date}`,
       employee_id: employeeId,
@@ -449,11 +473,13 @@ export default function App() {
     else fetchLedger();
   }
   async function removeLateDeduction(employeeId, date) {
+    if (!requireAuth()) return;
     const { error: err } = await supabase.from("ledger").delete().eq("id", `LATE_${employeeId}_${date}`);
     if (err) setError(`차감 기록 삭제 실패: ${err.message}`);
     else fetchLedger();
   }
   async function deleteMonthData(month) {
+    if (!requireAuth()) return;
     if (!window.confirm(`${month} 근태 데이터를 전부 삭제할까요? 되돌릴 수 없습니다.`)) return;
     const start = `${month}-01`;
     const endExclusive = monthEndExclusive(month);
@@ -468,6 +494,7 @@ export default function App() {
 
   /* ---- upload: 파일에 포함된 월을 통째로 교체 ---- */
   async function handleFile(file) {
+    if (!requireAuth()) return;
     setUploadMsg("");
     setError("");
     setUploading(true);
@@ -547,6 +574,7 @@ export default function App() {
 
   /* ---- ledger ---- */
   async function insertLedgerEntry({ employeeId, type, direction, minutes, date, note }) {
+    if (!requireAuth()) return;
     const row = {
       id: `L${Date.now()}${Math.floor(Math.random() * 1000)}`,
       employee_id: employeeId,
@@ -579,6 +607,7 @@ export default function App() {
     setLedgerNote("");
   }
   async function removeLedgerEntry(id) {
+    if (!requireAuth()) return;
     const { error: err } = await supabase.from("ledger").delete().eq("id", id);
     if (err) setError(`기록 삭제 실패: ${err.message}`);
     else fetchLedger();
@@ -779,14 +808,34 @@ export default function App() {
       `}</style>
 
       <header style={{ marginBottom: 22 }}>
-        <div style={{ fontSize: 12, letterSpacing: 0.3, color: COLORS.teal, fontWeight: 700, marginBottom: 4 }}>
-          DOD Dermatology Cheongdam
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", flexWrap: "wrap", gap: 10 }}>
+          <div>
+            <div style={{ fontSize: 12, letterSpacing: 0.3, color: COLORS.teal, fontWeight: 700, marginBottom: 4 }}>
+              DOD Dermatology Cheongdam
+            </div>
+            <h1 style={{ fontSize: 24, fontWeight: 800, margin: 0, color: COLORS.tealDark }}>근태 · 연차 · OT 통합관리</h1>
+            <p style={{ fontSize: 13, color: COLORS.sub, marginTop: 6 }}>
+              Supabase 데이터베이스에 저장됩니다 · 캡스 근태 엑셀을 업로드하면 지각·연장근무가 자동 반영되고 매달 계속 누적됩니다.
+            </p>
+          </div>
+          <div>
+            {session ? (
+              <div style={{ display: "flex", alignItems: "center", gap: 8, fontSize: 12.5, color: COLORS.sub }}>
+                <span>관리자: {session.user.email}</span>
+                <button className="btn" style={{ background: COLORS.tealSoft, color: COLORS.tealDark }} onClick={() => supabase.auth.signOut()}>
+                  로그아웃
+                </button>
+              </div>
+            ) : (
+              <button className="btn" style={{ background: COLORS.teal, color: "#fff" }} onClick={() => setShowLogin(true)}>
+                관리자 로그인
+              </button>
+            )}
+          </div>
         </div>
-        <h1 style={{ fontSize: 24, fontWeight: 800, margin: 0, color: COLORS.tealDark }}>근태 · 연차 · OT 통합관리</h1>
-        <p style={{ fontSize: 13, color: COLORS.sub, marginTop: 6 }}>
-          Supabase 데이터베이스에 저장됩니다 · 캡스 근태 엑셀을 업로드하면 지각·연장근무가 자동 반영되고 매달 계속 누적됩니다.
-        </p>
       </header>
+
+      {showLogin && !session && <LoginModal onClose={() => setShowLogin(false)} />}
 
       <div style={{ display: "flex", gap: 20, alignItems: "center", marginBottom: 18, flexWrap: "wrap" }}>
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
@@ -895,6 +944,71 @@ export default function App() {
           onClose={() => setSelectedId(null)}
         />
       )}
+    </div>
+  );
+}
+
+function LoginModal({ onClose }) {
+  const [email, setEmail] = useState("");
+  const [password, setPassword] = useState("");
+  const [error, setError] = useState("");
+  const [loading, setLoading] = useState(false);
+
+  async function handleLogin(e) {
+    e.preventDefault();
+    setError("");
+    setLoading(true);
+    const { error: err } = await supabase.auth.signInWithPassword({ email, password });
+    setLoading(false);
+    if (err) setError("로그인 실패: 이메일 또는 비밀번호를 확인해주세요.");
+  }
+
+  return (
+    <div
+      onClick={onClose}
+      style={{
+        position: "fixed", inset: 0, background: "rgba(10,20,18,0.45)",
+        display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1100, padding: 20,
+      }}
+    >
+      <form
+        onSubmit={handleLogin}
+        onClick={(e) => e.stopPropagation()}
+        style={{ background: "#fff", borderRadius: 14, width: "100%", maxWidth: 360, padding: 26, boxShadow: "0 20px 60px rgba(0,0,0,0.25)" }}
+      >
+        <div style={{ fontSize: 17, fontWeight: 800, color: COLORS.tealDark, marginBottom: 4 }}>관리자 로그인</div>
+        <div style={{ fontSize: 12.5, color: COLORS.sub, marginBottom: 16 }}>
+          수정 권한이 있는 계정으로 로그인하세요. 조회는 로그인 없이도 가능합니다.
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+          <input
+            className="input"
+            type="email"
+            placeholder="이메일"
+            value={email}
+            onChange={(e) => setEmail(e.target.value)}
+            required
+            autoFocus
+          />
+          <input
+            className="input"
+            type="password"
+            placeholder="비밀번호"
+            value={password}
+            onChange={(e) => setPassword(e.target.value)}
+            required
+          />
+        </div>
+        {error && <div style={{ color: COLORS.red, fontSize: 12.5, marginTop: 10 }}>{error}</div>}
+        <div style={{ display: "flex", gap: 8, marginTop: 18 }}>
+          <button type="submit" className="btn" style={{ background: COLORS.teal, color: "#fff", flex: 1 }} disabled={loading}>
+            {loading ? "확인 중..." : "로그인"}
+          </button>
+          <button type="button" className="btn" style={{ background: "transparent", color: COLORS.sub }} onClick={onClose}>
+            취소
+          </button>
+        </div>
+      </form>
     </div>
   );
 }
