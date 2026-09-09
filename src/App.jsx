@@ -45,6 +45,7 @@ const TEAM_COLORS = {
   미지정: "#5E6C68",
 };
 const POSITION_LIST = ["원장", "실장", "팀장", "부팀장", "사원"];
+const POSITION_RANK = { 원장: 0, 실장: 1, 팀장: 2, 부팀장: 3, 사원: 4 };
 const WEEKDAY_ORDER = [1, 2, 3, 4, 5, 6];
 const WEEKDAY_LABELS = { 1: "월", 2: "화", 3: "수", 4: "목", 5: "금", 6: "토" };
 
@@ -423,16 +424,17 @@ export default function App() {
   }
 
   /* ---- 지각을 시간차감(연차/OT 사용)으로 처리 ---- */
-  async function excuseLate(employeeId, date, ledgerType, minutes, note) {
+  /* 지각 카운트 포함 여부와 차감(연차/OT) 처리는 서로 독립적으로 관리 */
+  async function setLateExcused(employeeId, date, excused) {
     const { error: err } = await supabase
       .from("attendance")
-      .update({ excused: true })
+      .update({ excused })
       .eq("employee_id", employeeId)
       .eq("date", date);
-    if (err) {
-      setError(`처리 실패: ${err.message}`);
-      return;
-    }
+    if (err) setError(`처리 실패: ${err.message}`);
+    else fetchAttendance();
+  }
+  async function setLateDeduction(employeeId, date, ledgerType, minutes, note) {
     const ledgerRow = {
       id: `LATE_${employeeId}_${date}`,
       employee_id: employeeId,
@@ -440,25 +442,16 @@ export default function App() {
       direction: "use",
       minutes: Math.abs(parseInt(minutes, 10) || 0),
       date,
-      note: note || "지각 시간차감 처리",
+      note: note || "지각 시간차감",
     };
-    const { error: err2 } = await supabase.from("ledger").upsert(ledgerRow, { onConflict: "id" });
-    if (err2) setError(`차감 기록 저장 실패: ${err2.message}`);
-    await Promise.all([fetchAttendance(), fetchLedger()]);
+    const { error: err } = await supabase.from("ledger").upsert(ledgerRow, { onConflict: "id" });
+    if (err) setError(`차감 기록 저장 실패: ${err.message}`);
+    else fetchLedger();
   }
-  async function unexcuseLate(employeeId, date) {
-    const { error: err } = await supabase
-      .from("attendance")
-      .update({ excused: false })
-      .eq("employee_id", employeeId)
-      .eq("date", date);
-    if (err) {
-      setError(`처리 실패: ${err.message}`);
-      return;
-    }
-    const { error: err2 } = await supabase.from("ledger").delete().eq("id", `LATE_${employeeId}_${date}`);
-    if (err2) setError(`차감 기록 삭제 실패: ${err2.message}`);
-    await Promise.all([fetchAttendance(), fetchLedger()]);
+  async function removeLateDeduction(employeeId, date) {
+    const { error: err } = await supabase.from("ledger").delete().eq("id", `LATE_${employeeId}_${date}`);
+    if (err) setError(`차감 기록 삭제 실패: ${err.message}`);
+    else fetchLedger();
   }
   async function deleteMonthData(month) {
     if (!window.confirm(`${month} 근태 데이터를 전부 삭제할까요? 되돌릴 수 없습니다.`)) return;
@@ -553,23 +546,52 @@ export default function App() {
   }
 
   /* ---- ledger ---- */
-  async function addLedgerEntry() {
-    if (!ledgerEmp || !ledgerMinutes) return;
+  async function insertLedgerEntry({ employeeId, type, direction, minutes, date, note }) {
     const row = {
-      id: `L${Date.now()}`,
-      employee_id: ledgerEmp,
-      type: ledgerType,
-      direction: ledgerDir,
-      minutes: Math.abs(parseInt(ledgerMinutes, 10) || 0),
-      date: ledgerDate,
-      note: ledgerNote.trim(),
+      id: `L${Date.now()}${Math.floor(Math.random() * 1000)}`,
+      employee_id: employeeId,
+      type,
+      direction,
+      minutes: Math.abs(parseInt(minutes, 10) || 0),
+      date,
+      note: note || "",
     };
     const { error: err } = await supabase.from("ledger").insert(row);
     if (err) setError(`기록 추가 실패: ${err.message}`);
-    else {
-      setLedgerNote("");
-      fetchLedger();
+    else fetchLedger();
+  }
+
+  /* 대휴(대체휴무): 공휴일 근무로 발생, 연차보다 먼저 소진 */
+  async function grantDaehyu(employeeId, date, note) {
+    await insertLedgerEntry({ employeeId, type: "daehyu", direction: "grant", minutes: DAY_MINUTES, date, note: note || "대휴 발생(공휴일 근무)" });
+  }
+  async function useLeaveWithDaehyuPriority(employeeId, days, date, note) {
+    const minutes = Math.round(parseFloat(days) * DAY_MINUTES);
+    if (!minutes) return;
+    const daehyuBalance = ledger
+      .filter((l) => l.employeeId === employeeId && l.type === "daehyu")
+      .reduce((s, l) => s + (l.direction === "grant" ? l.minutes : -l.minutes), 0);
+    const fromDaehyu = Math.min(Math.max(daehyuBalance, 0), minutes);
+    const fromLeave = minutes - fromDaehyu;
+    if (fromDaehyu > 0) {
+      await insertLedgerEntry({ employeeId, type: "daehyu", direction: "use", minutes: fromDaehyu, date, note: note || "휴가 사용(대휴 우선 차감)" });
     }
+    if (fromLeave > 0) {
+      await insertLedgerEntry({ employeeId, type: "leave", direction: "use", minutes: fromLeave, date, note: note || "연차 사용" });
+    }
+  }
+
+  async function addLedgerEntry() {
+    if (!ledgerEmp || !ledgerMinutes) return;
+    await insertLedgerEntry({
+      employeeId: ledgerEmp,
+      type: ledgerType,
+      direction: ledgerDir,
+      minutes: ledgerMinutes,
+      date: ledgerDate,
+      note: ledgerNote.trim(),
+    });
+    setLedgerNote("");
   }
   async function removeLedgerEntry(id) {
     const { error: err } = await supabase.from("ledger").delete().eq("id", id);
@@ -654,6 +676,14 @@ export default function App() {
         .reduce((s, l) => s + l.minutes, 0);
       const leaveRemaining = emp.openingLeaveMinutes + leaveEarnedMinutes - leaveUsed + leaveAdjust;
 
+      const daehyuGranted = empLedger
+        .filter((l) => l.type === "daehyu" && l.direction === "grant")
+        .reduce((s, l) => s + l.minutes, 0);
+      const daehyuUsed = empLedger
+        .filter((l) => l.type === "daehyu" && l.direction === "use")
+        .reduce((s, l) => s + l.minutes, 0);
+      const daehyuRemaining = daehyuGranted - daehyuUsed;
+
       return {
         ...emp,
         workedDays,
@@ -666,6 +696,9 @@ export default function App() {
         leaveEarnedMinutes,
         leaveUsed,
         leaveRemaining,
+        daehyuGranted,
+        daehyuUsed,
+        daehyuRemaining,
       };
     });
   }, [employees, ledger, attendance, asOf]);
@@ -676,6 +709,14 @@ export default function App() {
       const t = r.team || "미지정";
       if (!groups[t]) groups[t] = [];
       groups[t].push(r);
+    });
+    Object.values(groups).forEach((rows) => {
+      rows.sort((a, b) => {
+        const ra = POSITION_RANK[a.position] ?? 99;
+        const rb = POSITION_RANK[b.position] ?? 99;
+        if (ra !== rb) return ra - rb;
+        return a.name.localeCompare(b.name);
+      });
     });
     return TEAM_ORDER.filter((t) => groups[t] && groups[t].length > 0).map((t) => ({
       team: t,
@@ -795,7 +836,13 @@ export default function App() {
         <DashboardTab groupedByTeam={groupedByTeam} collapsed={collapsed} toggleTeam={toggleTeam} onSelect={setSelectedId} />
       )}
       {tab === "late" && (
-        <LateDetailTab lateRecords={lateRecords} excuseLate={excuseLate} unexcuseLate={unexcuseLate} />
+        <LateDetailTab
+          lateRecords={lateRecords}
+          ledger={ledger}
+          setLateExcused={setLateExcused}
+          setLateDeduction={setLateDeduction}
+          removeLateDeduction={removeLateDeduction}
+        />
       )}
       {tab === "upload" && (
         <UploadTab
@@ -851,10 +898,14 @@ export default function App() {
         <EmployeeDetailModal
           row={summaryRows.find((r) => r.id === selectedId)}
           lateRecords={lateRecords}
-          excuseLate={excuseLate}
-          unexcuseLate={unexcuseLate}
+          setLateExcused={setLateExcused}
+          setLateDeduction={setLateDeduction}
+          removeLateDeduction={removeLateDeduction}
           ledger={ledger}
           removeLedgerEntry={removeLedgerEntry}
+          insertLedgerEntry={insertLedgerEntry}
+          grantDaehyu={grantDaehyu}
+          useLeaveWithDaehyuPriority={useLeaveWithDaehyuPriority}
           updateEmployee={updateEmployee}
           removeEmployee={removeEmployee}
           onClose={() => setSelectedId(null)}
@@ -1030,8 +1081,15 @@ function WeeklyScheduleEditor({ employee, updateEmployee }) {
   );
 }
 
-function EmployeeDetailModal({ row, lateRecords, excuseLate, unexcuseLate, ledger, removeLedgerEntry, updateEmployee, removeEmployee, onClose }) {
-  const [expandedStat, setExpandedStat] = useState(null); // null | 'ot' | 'leave'
+function EmployeeDetailModal({
+  row, lateRecords, setLateExcused, setLateDeduction, removeLateDeduction,
+  ledger, removeLedgerEntry, insertLedgerEntry, grantDaehyu, useLeaveWithDaehyuPriority,
+  updateEmployee, removeEmployee, onClose,
+}) {
+  const [expandedStat, setExpandedStat] = useState(null); // null | 'ot' | 'leave' | 'daehyu'
+  const [addValue, setAddValue] = useState("");
+  const [addDate, setAddDate] = useState(toISO(new Date()));
+  const [addNote, setAddNote] = useState("");
   if (!row) return null;
   const otLow = row.otRemaining < 0;
   const leaveLow = row.leaveRemaining <= DAY_MINUTES * 2 && row.leaveRemaining >= 0;
@@ -1041,6 +1099,27 @@ function EmployeeDetailModal({ row, lateRecords, excuseLate, unexcuseLate, ledge
   const statHistory = (ledger || [])
     .filter((l) => l.employeeId === row.id && l.type === expandedStat)
     .sort((a, b) => (a.date < b.date ? 1 : -1));
+
+  function toggleStat(key) {
+    setExpandedStat(expandedStat === key ? null : key);
+    setAddValue("");
+    setAddNote("");
+  }
+  function submitUse() {
+    if (!addValue) return;
+    if (expandedStat === "leave") useLeaveWithDaehyuPriority(row.id, addValue, addDate, addNote || undefined);
+    else if (expandedStat === "ot") insertLedgerEntry({ employeeId: row.id, type: "ot", direction: "use", minutes: addValue, date: addDate, note: addNote });
+    setAddValue("");
+  }
+  function submitDaehyuGrant() {
+    grantDaehyu(row.id, addDate, addNote || undefined);
+    setAddNote("");
+  }
+  function submitDaehyuUse() {
+    if (!addValue) return;
+    insertLedgerEntry({ employeeId: row.id, type: "daehyu", direction: "use", minutes: Math.round(parseFloat(addValue) * DAY_MINUTES), date: addDate, note: addNote || "대휴 사용" });
+    setAddValue("");
+  }
 
   const stat = (label, value, onClick) => (
     <div
@@ -1096,20 +1175,59 @@ function EmployeeDetailModal({ row, lateRecords, excuseLate, unexcuseLate, ledge
               <div style={{ fontSize: 14.5, fontWeight: 700, color: otLow ? COLORS.red : COLORS.tealDark }}>{minutesToHM(row.otRemaining)}</div>
             </div>
             {stat("연차 발생", row.hireDate ? `${row.leaveCalc.days}일` : "입사일 미입력")}
-            {stat("연차 사용", minutesToDaysLabel(row.leaveUsed), () => setExpandedStat(expandedStat === "leave" ? null : "leave"))}
+            {stat("연차 사용", minutesToDaysLabel(row.leaveUsed), () => toggleStat("leave"))}
             <div style={{ background: leaveNeg ? COLORS.redSoft : leaveLow ? COLORS.amberSoft : COLORS.tealSoft, borderRadius: 8, padding: "10px 12px" }}>
               <div style={{ fontSize: 11.5, color: leaveNeg ? COLORS.red : leaveLow ? COLORS.amber : COLORS.tealDark, marginBottom: 3 }}>연차 잔여</div>
               <div style={{ fontSize: 14.5, fontWeight: 700, color: leaveNeg ? COLORS.red : leaveLow ? COLORS.amber : COLORS.tealDark }}>
                 {row.hireDate ? minutesToDaysLabel(row.leaveRemaining) : "-"}
               </div>
             </div>
+            {stat("대휴 발생", minutesToDaysLabel(row.daehyuGranted))}
+            {stat("대휴 사용", minutesToDaysLabel(row.daehyuUsed), () => toggleStat("daehyu"))}
+            <div style={{ background: COLORS.tealSoft, borderRadius: 8, padding: "10px 12px" }}>
+              <div style={{ fontSize: 11.5, color: COLORS.tealDark, marginBottom: 3 }}>대휴 잔여</div>
+              <div style={{ fontSize: 14.5, fontWeight: 700, color: COLORS.tealDark }}>{minutesToDaysLabel(row.daehyuRemaining)}</div>
+            </div>
           </div>
 
           {expandedStat && (
             <div style={{ marginBottom: 20, border: `1px solid ${COLORS.border}`, borderRadius: 8, overflow: "hidden" }}>
               <div style={{ background: COLORS.tealSoft, color: COLORS.tealDark, padding: "8px 12px", fontSize: 12.5, fontWeight: 700 }}>
-                {expandedStat === "ot" ? "OT 사용/조정 내역" : "연차 사용/조정 내역"}
+                {expandedStat === "ot" ? "OT 사용/조정 내역" : expandedStat === "leave" ? "연차 사용/조정 내역" : "대휴 발생/사용 내역"}
               </div>
+
+              <div style={{ padding: 10, borderBottom: `1px solid ${COLORS.border}`, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", background: "#fafcfb" }}>
+                {expandedStat === "leave" && (
+                  <>
+                    <input type="number" step="0.5" className="input" placeholder="일수" style={{ width: 80 }} value={addValue} onChange={(e) => setAddValue(e.target.value)} />
+                    <span style={{ fontSize: 12, color: COLORS.sub }}>일 사용</span>
+                    <input type="date" className="input" value={addDate} onChange={(e) => setAddDate(e.target.value)} />
+                    <input className="input" placeholder="메모(선택)" style={{ width: 130 }} value={addNote} onChange={(e) => setAddNote(e.target.value)} />
+                    <button className="btn" style={{ background: COLORS.teal, color: "#fff" }} onClick={submitUse}>추가</button>
+                    <div style={{ fontSize: 11.5, color: COLORS.sub, width: "100%" }}>대휴 잔여가 있으면 자동으로 먼저 차감되고, 남는 만큼만 연차에서 차감됩니다.</div>
+                  </>
+                )}
+                {expandedStat === "ot" && (
+                  <>
+                    <input type="number" className="input" placeholder="분" style={{ width: 80 }} value={addValue} onChange={(e) => setAddValue(e.target.value)} />
+                    <span style={{ fontSize: 12, color: COLORS.sub }}>분 사용</span>
+                    <input type="date" className="input" value={addDate} onChange={(e) => setAddDate(e.target.value)} />
+                    <input className="input" placeholder="메모(선택)" style={{ width: 130 }} value={addNote} onChange={(e) => setAddNote(e.target.value)} />
+                    <button className="btn" style={{ background: COLORS.teal, color: "#fff" }} onClick={submitUse}>추가</button>
+                  </>
+                )}
+                {expandedStat === "daehyu" && (
+                  <>
+                    <input type="date" className="input" value={addDate} onChange={(e) => setAddDate(e.target.value)} />
+                    <input className="input" placeholder="메모(선택, 예: 8/15 근무)" style={{ width: 150 }} value={addNote} onChange={(e) => setAddNote(e.target.value)} />
+                    <button className="btn" style={{ background: COLORS.teal, color: "#fff" }} onClick={submitDaehyuGrant}>대휴 발생(+1일) 추가</button>
+                    <span style={{ borderLeft: `1px solid ${COLORS.border}`, height: 20, margin: "0 4px" }} />
+                    <input type="number" step="0.5" className="input" placeholder="일수" style={{ width: 70 }} value={addValue} onChange={(e) => setAddValue(e.target.value)} />
+                    <button className="btn" style={{ background: COLORS.tealSoft, color: COLORS.tealDark }} onClick={submitDaehyuUse}>대휴 사용 추가</button>
+                  </>
+                )}
+              </div>
+
               <table>
                 <thead>
                   <tr>
@@ -1131,7 +1249,7 @@ function EmployeeDetailModal({ row, lateRecords, excuseLate, unexcuseLate, ledge
                   {statHistory.map((l) => (
                     <tr key={l.id}>
                       <td style={{ padding: "6px 10px" }}>{fmtDate(l.date)}</td>
-                      <td style={{ padding: "6px 10px" }}>{l.direction === "use" ? "사용" : "조정(+)"}</td>
+                      <td style={{ padding: "6px 10px" }}>{l.direction === "use" ? "사용" : l.direction === "grant" ? "발생" : "조정(+)"}</td>
                       <td style={{ padding: "6px 10px" }}>{l.minutes}분</td>
                       <td style={{ padding: "6px 10px", color: COLORS.sub }}>{l.note || "-"}</td>
                       <td style={{ padding: "6px 10px" }}>
@@ -1172,7 +1290,14 @@ function EmployeeDetailModal({ row, lateRecords, excuseLate, unexcuseLate, ledge
           <div style={{ fontSize: 12, color: COLORS.sub, marginBottom: 8 }}>
             여기서 바로 차감 처리하거나 되돌릴 수 있습니다. 근무시간 예외 설정은 직원 관리 탭에서 계속 수정할 수 있어요.
           </div>
-          <LateRecordsTable records={personLateRecords} excuseLate={excuseLate} unexcuseLate={unexcuseLate} showNameTeam={false} />
+          <LateRecordsTable
+            records={personLateRecords}
+            ledger={ledger}
+            setLateExcused={setLateExcused}
+            setLateDeduction={setLateDeduction}
+            removeLateDeduction={removeLateDeduction}
+            showNameTeam={false}
+          />
 
           <div style={{ marginTop: 20, borderTop: `1px solid ${COLORS.border}`, paddingTop: 14 }}>
             <button
@@ -1208,27 +1333,23 @@ function Badge({ text, tone }) {
   );
 }
 
-function LateRecordsTable({ records, excuseLate, unexcuseLate, showNameTeam = true }) {
+function LateRecordsTable({ records, ledger, setLateExcused, setLateDeduction, removeLateDeduction, showNameTeam = true }) {
   const [editingKey, setEditingKey] = useState(null);
-  const [editType, setEditType] = useState("leave");
+  const [editType, setEditType] = useState("ot");
   const [editMinutes, setEditMinutes] = useState("");
 
-  function startEdit(r) {
+  function findDeduction(r) {
+    return (ledger || []).find((l) => l.id === `LATE_${r.rawEmployeeId}_${r.date}`);
+  }
+  function startEdit(r, existing) {
     const key = `${r.rawEmployeeId}_${r.date}`;
     setEditingKey(key);
-    setEditType("leave");
-    setEditMinutes(String(r.lateMinutes));
+    setEditType(existing ? existing.type : "ot");
+    setEditMinutes(String(existing ? existing.minutes : r.lateMinutes));
   }
-  function confirmExcuse(r) {
-    excuseLate(r.rawEmployeeId, r.date, editType, editMinutes, "지각 시간차감 처리");
+  function confirmDeduction(r) {
+    setLateDeduction(r.rawEmployeeId, r.date, editType, editMinutes, "지각 시간차감");
     setEditingKey(null);
-  }
-  function handleStatusChange(r, value) {
-    if (value === "excused") startEdit(r);
-    else {
-      setEditingKey(null);
-      unexcuseLate(r.rawEmployeeId, r.date);
-    }
   }
 
   return (
@@ -1254,6 +1375,7 @@ function LateRecordsTable({ records, excuseLate, unexcuseLate, showNameTeam = tr
         {records.map((r) => {
           const key = `${r.rawEmployeeId}_${r.date}`;
           const isEditing = editingKey === key;
+          const deduction = findDeduction(r);
           return (
             <tr key={key}>
               {showNameTeam && <td style={{ fontWeight: 600 }}>{r.employeeName}</td>}
@@ -1265,18 +1387,18 @@ function LateRecordsTable({ records, excuseLate, unexcuseLate, showNameTeam = tr
                   className="input"
                   style={{ padding: "4px 6px", fontSize: 12.5, fontWeight: 700, color: r.excused ? COLORS.tealDark : COLORS.red }}
                   value={r.excused ? "excused" : "late"}
-                  onChange={(e) => handleStatusChange(r, e.target.value)}
+                  onChange={(e) => setLateExcused(r.rawEmployeeId, r.date, e.target.value === "excused")}
                 >
                   <option value="late">지각</option>
-                  <option value="excused">차감 처리</option>
+                  <option value="excused">늦출</option>
                 </select>
               </td>
               <td>
                 {isEditing ? (
                   <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
                     <select className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={editType} onChange={(e) => setEditType(e.target.value)}>
-                      <option value="leave">연차에서 차감</option>
                       <option value="ot">OT에서 차감</option>
+                      <option value="leave">연차에서 차감</option>
                     </select>
                     <input
                       type="number"
@@ -1286,21 +1408,21 @@ function LateRecordsTable({ records, excuseLate, unexcuseLate, showNameTeam = tr
                       onChange={(e) => setEditMinutes(e.target.value)}
                     />
                     <span style={{ fontSize: 12, color: COLORS.sub }}>분</span>
-                    <button className="btn" style={{ background: COLORS.teal, color: "#fff", padding: "4px 10px" }} onClick={() => confirmExcuse(r)}>확인</button>
-                    <button
-                      className="btn"
-                      style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px" }}
-                      onClick={() => setEditingKey(null)}
-                    >
-                      취소
-                    </button>
+                    <button className="btn" style={{ background: COLORS.teal, color: "#fff", padding: "4px 10px" }} onClick={() => confirmDeduction(r)}>확인</button>
+                    <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px" }} onClick={() => setEditingKey(null)}>취소</button>
                   </div>
-                ) : r.excused ? (
-                  <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px" }} onClick={() => startEdit(r)}>
-                    차감 내용 수정
-                  </button>
+                ) : deduction ? (
+                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                    <span style={{ fontSize: 12.5 }}>
+                      {deduction.type === "ot" ? "OT" : "연차"} {deduction.minutes}분 차감
+                    </span>
+                    <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "3px 8px", fontSize: 12 }} onClick={() => startEdit(r, deduction)}>수정</button>
+                    <button className="btn" style={{ background: "transparent", color: COLORS.red, padding: "3px 8px", fontSize: 12 }} onClick={() => removeLateDeduction(r.rawEmployeeId, r.date)}>삭제</button>
+                  </div>
                 ) : (
-                  <span style={{ color: COLORS.sub, fontSize: 12 }}>-</span>
+                  <button className="btn" style={{ background: COLORS.tealSoft, color: COLORS.tealDark, padding: "4px 10px" }} onClick={() => startEdit(r, null)}>
+                    차감 설정
+                  </button>
                 )}
               </td>
             </tr>
@@ -1311,7 +1433,7 @@ function LateRecordsTable({ records, excuseLate, unexcuseLate, showNameTeam = tr
   );
 }
 
-function LateDetailTab({ lateRecords, excuseLate, unexcuseLate }) {
+function LateDetailTab({ lateRecords, ledger, setLateExcused, setLateDeduction, removeLateDeduction }) {
   const [query, setQuery] = useState("");
   const [empFilter, setEmpFilter] = useState("");
 
@@ -1355,7 +1477,14 @@ function LateDetailTab({ lateRecords, excuseLate, unexcuseLate }) {
           </button>
         )}
       </div>
-      <LateRecordsTable records={filtered} excuseLate={excuseLate} unexcuseLate={unexcuseLate} showNameTeam />
+      <LateRecordsTable
+        records={filtered}
+        ledger={ledger}
+        setLateExcused={setLateExcused}
+        setLateDeduction={setLateDeduction}
+        removeLateDeduction={removeLateDeduction}
+        showNameTeam
+      />
     </div>
   );
 }
