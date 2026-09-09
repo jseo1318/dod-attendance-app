@@ -561,24 +561,9 @@ export default function App() {
     else fetchLedger();
   }
 
-  /* 대휴(대체휴무): 공휴일 근무로 발생, 연차보다 먼저 소진 */
+  /* 대휴(대체휴무): 공휴일 근무로 발생. OT/연차와 동일하게 전부 수동으로 차감/조정 */
   async function grantDaehyu(employeeId, date, note) {
-    await insertLedgerEntry({ employeeId, type: "daehyu", direction: "grant", minutes: DAY_MINUTES, date, note: note || "대휴 발생(공휴일 근무)" });
-  }
-  async function useLeaveWithDaehyuPriority(employeeId, days, date, note) {
-    const minutes = Math.round(parseFloat(days) * DAY_MINUTES);
-    if (!minutes) return;
-    const daehyuBalance = ledger
-      .filter((l) => l.employeeId === employeeId && l.type === "daehyu")
-      .reduce((s, l) => s + (l.direction === "grant" ? l.minutes : -l.minutes), 0);
-    const fromDaehyu = Math.min(Math.max(daehyuBalance, 0), minutes);
-    const fromLeave = minutes - fromDaehyu;
-    if (fromDaehyu > 0) {
-      await insertLedgerEntry({ employeeId, type: "daehyu", direction: "use", minutes: fromDaehyu, date, note: note || "휴가 사용(대휴 우선 차감)" });
-    }
-    if (fromLeave > 0) {
-      await insertLedgerEntry({ employeeId, type: "leave", direction: "use", minutes: fromLeave, date, note: note || "연차 사용" });
-    }
+    await insertLedgerEntry({ employeeId, type: "daehyu", direction: "adjust", minutes: DAY_MINUTES, date, note: note || "대휴 발생(공휴일 근무)" });
   }
 
   async function addLedgerEntry() {
@@ -677,7 +662,7 @@ export default function App() {
       const leaveRemaining = emp.openingLeaveMinutes + leaveEarnedMinutes - leaveUsed + leaveAdjust;
 
       const daehyuGranted = empLedger
-        .filter((l) => l.type === "daehyu" && l.direction === "grant")
+        .filter((l) => l.type === "daehyu" && (l.direction === "adjust" || l.direction === "grant"))
         .reduce((s, l) => s + l.minutes, 0);
       const daehyuUsed = empLedger
         .filter((l) => l.type === "daehyu" && l.direction === "use")
@@ -905,7 +890,6 @@ export default function App() {
           removeLedgerEntry={removeLedgerEntry}
           insertLedgerEntry={insertLedgerEntry}
           grantDaehyu={grantDaehyu}
-          useLeaveWithDaehyuPriority={useLeaveWithDaehyuPriority}
           updateEmployee={updateEmployee}
           removeEmployee={removeEmployee}
           onClose={() => setSelectedId(null)}
@@ -1083,7 +1067,7 @@ function WeeklyScheduleEditor({ employee, updateEmployee }) {
 
 function EmployeeDetailModal({
   row, lateRecords, setLateExcused, setLateDeduction, removeLateDeduction,
-  ledger, removeLedgerEntry, insertLedgerEntry, grantDaehyu, useLeaveWithDaehyuPriority,
+  ledger, removeLedgerEntry, insertLedgerEntry, grantDaehyu,
   updateEmployee, removeEmployee, onClose,
 }) {
   const [expandedStat, setExpandedStat] = useState(null); // null | 'ot' | 'leave' | 'daehyu'
@@ -1107,8 +1091,11 @@ function EmployeeDetailModal({
   }
   function submitUse() {
     if (!addValue) return;
-    if (expandedStat === "leave") useLeaveWithDaehyuPriority(row.id, addValue, addDate, addNote || undefined);
-    else if (expandedStat === "ot") insertLedgerEntry({ employeeId: row.id, type: "ot", direction: "use", minutes: addValue, date: addDate, note: addNote });
+    if (expandedStat === "leave") {
+      insertLedgerEntry({ employeeId: row.id, type: "leave", direction: "use", minutes: Math.round(parseFloat(addValue) * DAY_MINUTES), date: addDate, note: addNote });
+    } else if (expandedStat === "ot") {
+      insertLedgerEntry({ employeeId: row.id, type: "ot", direction: "use", minutes: addValue, date: addDate, note: addNote });
+    }
     setAddValue("");
   }
   function submitDaehyuGrant() {
@@ -1204,7 +1191,6 @@ function EmployeeDetailModal({
                     <input type="date" className="input" value={addDate} onChange={(e) => setAddDate(e.target.value)} />
                     <input className="input" placeholder="메모(선택)" style={{ width: 130 }} value={addNote} onChange={(e) => setAddNote(e.target.value)} />
                     <button className="btn" style={{ background: COLORS.teal, color: "#fff" }} onClick={submitUse}>추가</button>
-                    <div style={{ fontSize: 11.5, color: COLORS.sub, width: "100%" }}>대휴 잔여가 있으면 자동으로 먼저 차감되고, 남는 만큼만 연차에서 차감됩니다.</div>
                   </>
                 )}
                 {expandedStat === "ot" && (
@@ -1613,6 +1599,7 @@ function LedgerTab(props) {
           <select className="input" value={ledgerType} onChange={(e) => setLedgerType(e.target.value)}>
             <option value="leave">연차</option>
             <option value="ot">OT</option>
+            <option value="daehyu">대휴</option>
           </select>
           <select className="input" value={ledgerDir} onChange={(e) => setLedgerDir(e.target.value)}>
             <option value="use">사용</option>
@@ -1648,7 +1635,7 @@ function LedgerTab(props) {
             {ledger.map((l) => (
               <tr key={l.id}>
                 <td style={{ fontWeight: 600 }}>{employeeMap[l.employeeId] || "(삭제된 직원)"}</td>
-                <td>{l.type === "leave" ? "연차" : "OT"}</td>
+                <td>{l.type === "leave" ? "연차" : l.type === "ot" ? "OT" : "대휴"}</td>
                 <td>{l.direction === "use" ? "사용" : "조정(+)"}</td>
                 <td>{l.minutes}분</td>
                 <td>{fmtDate(l.date)}</td>
