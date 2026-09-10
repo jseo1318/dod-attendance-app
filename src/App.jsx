@@ -1646,19 +1646,29 @@ function CalendarTab({ employees, attendance, dayStatusOverrides, ledger, setLat
   );
 }
 
-/* 일퇴/OFF/출근/원본없는 지각·늦출의 분 단위 설정 인라인 폼 */
+/* 일퇴/OFF/출근/원본없는 지각·늦출의 분 단위 설정 인라인 폼
+   OFF = 그날 기본 근무시간(-90분)만큼 연차 차감 / 출근(쉬는날 나옴) = 대휴 1일(480분) 고정 발생 */
 function DayAdjustEditor({ status, initialMinutes, initialType, autoMinutes, onSave, onCancel }) {
-  const isAuto = status === "OFF" || status === "출근";
-  const [minutes, setMinutes] = useState(String(isAuto ? autoMinutes : initialMinutes || ""));
+  const isOff = status === "OFF";
+  const isWork = status === "출근";
+  const isAuto = isOff || isWork;
+  const fixedMinutes = isWork ? DAY_MINUTES : autoMinutes;
+  const [minutes, setMinutes] = useState(String(isAuto ? fixedMinutes : initialMinutes || ""));
   const [dedType, setDedType] = useState(initialType || "ot");
 
   return (
     <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", background: COLORS.bg, padding: 8, borderRadius: 6 }}>
-      {isAuto ? (
+      {isOff && (
         <span style={{ fontSize: 12.5, color: COLORS.sub }}>
-          요일 기본 근무시간 기준 자동 계산: <strong style={{ color: COLORS.text }}>{autoMinutes}분</strong> (연차 {status === "OFF" ? "차감" : "가산"})
+          요일 기본 근무시간 기준 자동 계산: <strong style={{ color: COLORS.text }}>{fixedMinutes}분</strong> 연차 차감
         </span>
-      ) : (
+      )}
+      {isWork && (
+        <span style={{ fontSize: 12.5, color: COLORS.sub }}>
+          대휴(대체휴무) <strong style={{ color: COLORS.text }}>1일(480분)</strong> 발생
+        </span>
+      )}
+      {!isAuto && (
         <>
           <input
             type="number"
@@ -1679,7 +1689,11 @@ function DayAdjustEditor({ status, initialMinutes, initialType, autoMinutes, onS
       <button
         className="btn"
         style={{ background: COLORS.teal, color: "#fff", padding: "4px 10px" }}
-        onClick={() => onSave(isAuto ? autoMinutes : minutes, isAuto ? "leave" : dedType)}
+        onClick={() => {
+          if (isWork) onSave(DAY_MINUTES, "daehyu");
+          else if (isOff) onSave(fixedMinutes, "leave");
+          else onSave(minutes, dedType);
+        }}
       >
         저장
       </button>
@@ -1861,7 +1875,7 @@ function DayDetailModal({
                         {row.status === "지각" || row.status === "늦출" ? (
                           lateLedger ? `${lateLedger.type === "ot" ? "OT" : "연차"} ${lateLedger.minutes}분 차감` : row.minutes ? `${row.minutes}분 (미차감)` : "-"
                         ) : dayLedger ? (
-                          `${dayLedger.type === "ot" ? "OT" : "연차"} ${dayLedger.minutes}분 ${dayLedger.direction === "adjust" ? "가산" : "차감"}`
+                          `${dayLedger.type === "ot" ? "OT" : dayLedger.type === "daehyu" ? "대휴" : "연차"} ${dayLedger.minutes}분 ${dayLedger.direction === "adjust" ? "가산" : "차감"}`
                         ) : (
                           "-"
                         )}
