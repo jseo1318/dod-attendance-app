@@ -1696,6 +1696,7 @@ function DayDetailModal({
   setDayAdjustment, removeDayAdjustment, onClose,
 }) {
   const [showAdd, setShowAdd] = useState(false);
+  const [addStep, setAddStep] = useState("pick"); // 'pick' | 'adjust'
   const [addEmp, setAddEmp] = useState("");
   const [addStatus, setAddStatus] = useState("일퇴");
 
@@ -1738,12 +1739,16 @@ function DayDetailModal({
 
   function submitAdd() {
     if (!addEmp) return;
-    setShowAdd(false);
     const emp = employees.find((e) => e.id === addEmp);
     const key = `${addEmp}_${date}`;
     const rec = attendanceIndex[key];
-    changeStatus({ emp, rec }, addStatus);
-    setAddEmp("");
+    if ((addStatus === "지각" || addStatus === "늦출") && rec) {
+      setLateExcused(rec.employeeId, date, addStatus === "늦출");
+      setShowAdd(false);
+      setAddEmp("");
+      return;
+    }
+    setAddStep("adjust");
   }
 
   const existingLedgerFor = (row) => (ledger || []).find((l) => l.id === `DAYADJ_${row.emp.id}_${date}`);
@@ -1766,11 +1771,19 @@ function DayDetailModal({
         </div>
 
         <div style={{ padding: 20 }}>
-          <button className="btn" style={{ background: COLORS.teal, color: "#fff", marginBottom: 14 }} onClick={() => setShowAdd((v) => !v)}>
+          <button
+            className="btn"
+            style={{ background: COLORS.teal, color: "#fff", marginBottom: 14 }}
+            onClick={() => {
+              setShowAdd((v) => !v);
+              setAddStep("pick");
+              setAddEmp("");
+            }}
+          >
             {showAdd ? "취소" : "+ 추가"}
           </button>
 
-          {showAdd && (
+          {showAdd && addStep === "pick" && (
             <div style={{ background: COLORS.bg, borderRadius: 8, padding: 12, marginBottom: 16, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
               <select className="input" value={addEmp} onChange={(e) => setAddEmp(e.target.value)} style={{ width: 130 }}>
                 <option value="">직원 선택</option>
@@ -1780,7 +1793,31 @@ function DayDetailModal({
                 {Object.keys(STATUS_LABELS).map((s) => (<option key={s} value={s}>{s}</option>))}
               </select>
               <button className="btn" style={{ background: COLORS.teal, color: "#fff" }} onClick={submitAdd}>다음</button>
-              <span style={{ fontSize: 11.5, color: COLORS.sub, width: "100%" }}>직원/유형 선택 후 "다음"을 누르면 분 입력창이 아래 목록에 나타나요.</span>
+            </div>
+          )}
+
+          {showAdd && addStep === "adjust" && (
+            <div style={{ background: COLORS.bg, borderRadius: 8, padding: 12, marginBottom: 16 }}>
+              <div style={{ fontSize: 12.5, fontWeight: 700, marginBottom: 8 }}>
+                {employees.find((e) => e.id === addEmp)?.name} · {addStatus}
+              </div>
+              <DayAdjustEditor
+                status={addStatus}
+                initialMinutes=""
+                initialType="ot"
+                autoMinutes={offDayMinutes(dow, employees.find((e) => e.id === addEmp))}
+                onSave={(minutes, dedType) => {
+                  setDayAdjustment(addEmp, date, addStatus, dedType, minutes, "");
+                  setShowAdd(false);
+                  setAddEmp("");
+                  setAddStep("pick");
+                }}
+                onCancel={() => {
+                  setShowAdd(false);
+                  setAddEmp("");
+                  setAddStep("pick");
+                }}
+              />
             </div>
           )}
 
