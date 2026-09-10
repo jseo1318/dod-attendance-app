@@ -166,11 +166,12 @@ function computeMetrics(record, employee) {
   return { late, otRaw, otCredited };
 }
 
-const STATUS_LABELS = { 지각: "지각", 늦출: "늦출", 일퇴: "일퇴", OFF: "OFF", 출근: "출근" };
+const STATUS_LABELS = { 지각: "지각", 늦출: "늦출", 일퇴: "일퇴", 반차: "반차", OFF: "OFF", 출근: "출근" };
 const STATUS_COLORS = {
   지각: { bg: "#FBEAE6", fg: "#B4432F" },
   늦출: { bg: "#E4F0EE", fg: "#0F5C55" },
   일퇴: { bg: "#FBF1DC", fg: "#B8860B" },
+  반차: { bg: "#EDE7F6", fg: "#6B4C93" },
   OFF: { bg: "#EDEFEE", fg: "#5E6C68" },
   출근: { bg: "#E4F0EE", fg: "#0A3E3A" },
 };
@@ -1634,7 +1635,7 @@ function CalendarTab({ employees, attendance, dayStatusOverrides, ledger, setLat
               <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
                 {cell.people.slice(0, 8).map((p) => {
                   const c = STATUS_COLORS[p.status] || STATUS_COLORS.OFF;
-                  const showMin = p.minutes && ["지각", "늦출", "일퇴"].includes(p.status);
+                  const showMin = p.minutes && ["지각", "늦출", "일퇴", "반차"].includes(p.status);
                   return (
                     <div
                       key={p.employeeId}
@@ -1688,9 +1689,10 @@ function CalendarTab({ employees, attendance, dayStatusOverrides, ledger, setLat
    OFF = 그날 기본 근무시간(-90분)만큼 연차 차감 / 출근(쉬는날 나옴) = 대휴 1일(480분) 고정 발생 */
 function DayAdjustEditor({ status, initialMinutes, initialType, autoMinutes, onSave, onCancel }) {
   const isOff = status === "OFF";
+  const isHalfOff = status === "반차";
   const isWork = status === "출근";
-  const isAuto = isOff || isWork;
-  const fixedMinutes = isWork ? DAY_MINUTES : autoMinutes;
+  const isAuto = isOff || isHalfOff || isWork;
+  const fixedMinutes = isWork ? DAY_MINUTES : isHalfOff ? Math.round(autoMinutes / 2) : autoMinutes;
   const [minutes, setMinutes] = useState(String(isAuto ? fixedMinutes : initialMinutes || ""));
   const [dedType, setDedType] = useState(initialType || "ot");
 
@@ -1699,6 +1701,11 @@ function DayAdjustEditor({ status, initialMinutes, initialType, autoMinutes, onS
       {isOff && (
         <span style={{ fontSize: 12.5, color: COLORS.sub }}>
           요일 기본 근무시간 기준 자동 계산: <strong style={{ color: COLORS.text }}>{fixedMinutes}분</strong> 연차 차감
+        </span>
+      )}
+      {isHalfOff && (
+        <span style={{ fontSize: 12.5, color: COLORS.sub }}>
+          반차 규정 기준 자동 계산(하루치 절반): <strong style={{ color: COLORS.text }}>{fixedMinutes}분</strong> 연차 차감
         </span>
       )}
       {isWork && (
@@ -1729,7 +1736,7 @@ function DayAdjustEditor({ status, initialMinutes, initialType, autoMinutes, onS
         style={{ background: COLORS.teal, color: "#fff", padding: "4px 10px" }}
         onClick={() => {
           if (isWork) onSave(DAY_MINUTES, "daehyu");
-          else if (isOff) onSave(fixedMinutes, "leave");
+          else if (isOff || isHalfOff) onSave(fixedMinutes, "leave");
           else onSave(minutes, dedType);
         }}
       >
@@ -1928,7 +1935,7 @@ function DayDetailModal({
                             {lateLedger ? "차감 수정" : "차감 설정"}
                           </button>
                         )}
-                        {(row.status === "일퇴" || row.status === "OFF" || row.status === "출근" || ((row.status === "지각" || row.status === "늦출") && !row.rec)) && (
+                        {(row.status === "일퇴" || row.status === "반차" || row.status === "OFF" || row.status === "출근" || ((row.status === "지각" || row.status === "늦출") && !row.rec)) && (
                           <button
                             className="btn"
                             style={{ background: COLORS.tealSoft, color: COLORS.tealDark, padding: "4px 10px" }}
@@ -1978,7 +1985,7 @@ function DayDetailModal({
                         </td>
                       </tr>
                     )}
-                    {isEditing && (row.status === "일퇴" || row.status === "OFF" || row.status === "출근" || ((row.status === "지각" || row.status === "늦출") && !row.rec)) && (
+                    {isEditing && (row.status === "일퇴" || row.status === "반차" || row.status === "OFF" || row.status === "출근" || ((row.status === "지각" || row.status === "늦출") && !row.rec)) && (
                       <tr>
                         <td colSpan={4}>
                           <DayAdjustEditor
