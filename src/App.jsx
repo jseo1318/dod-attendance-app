@@ -1118,10 +1118,11 @@ function DashboardTab({ groupedByTeam, collapsed, toggleTeam, onSelect }) {
                     <tr>
                       <th>이름</th>
                       <th>직급</th>
-                      <th>누적 지각횟수</th>
-                      <th>누적 지각시간</th>
+                      <th style={{ paddingRight: 4 }}>누적 지각횟수</th>
+                      <th style={{ paddingLeft: 4 }}>누적 지각시간</th>
                       <th>OT 잔여</th>
                       <th>연차 잔여</th>
+                      <th>대휴 잔여</th>
                       <th></th>
                     </tr>
                   </thead>
@@ -1152,8 +1153,8 @@ function DashboardTab({ groupedByTeam, collapsed, toggleTeam, onSelect }) {
                             </button>
                           </td>
                           <td style={{ color: COLORS.sub }}>{r.position || "-"}</td>
-                          <td>{r.totalLateCount}</td>
-                          <td>{minutesToHM(r.totalLateMinutes)}</td>
+                          <td style={{ paddingRight: 4 }}>{r.totalLateCount}</td>
+                          <td style={{ paddingLeft: 4 }}>{minutesToHM(r.totalLateMinutes)}</td>
                           <td>
                             <Badge text={minutesToHM(r.otRemaining)} tone={otLow ? "red" : "teal"} />
                           </td>
@@ -1166,6 +1167,9 @@ function DashboardTab({ groupedByTeam, collapsed, toggleTeam, onSelect }) {
                             ) : (
                               <span style={{ color: COLORS.sub, fontSize: 12 }}>입사일 미입력</span>
                             )}
+                          </td>
+                          <td>
+                            <Badge text={minutesToDaysLabel(r.daehyuRemaining)} tone="teal" />
                           </td>
                           <td>
                             <button
@@ -1557,6 +1561,17 @@ function CalendarTab({ employees, attendance, dayStatusOverrides, ledger, setLat
     setCursor(new Date(cursor.getFullYear(), cursor.getMonth() + delta, 1));
   }
 
+  const monthlyLateCounts = useMemo(() => {
+    const counts = {};
+    cells.forEach((cell) => {
+      if (!cell) return;
+      cell.people.forEach((p) => {
+        if (p.status === "지각") counts[p.name] = (counts[p.name] || 0) + 1;
+      });
+    });
+    return Object.entries(counts).sort((a, b) => b[1] - a[1]);
+  }, [cells]);
+
   return (
     <>
       <div className="card" style={{ marginBottom: 14 }}>
@@ -1567,6 +1582,29 @@ function CalendarTab({ employees, attendance, dayStatusOverrides, ledger, setLat
           </div>
           <button className="btn" style={{ background: COLORS.tealSoft, color: COLORS.tealDark }} onClick={() => goMonth(1)}>다음달 ›</button>
         </div>
+      </div>
+
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.tealDark, marginBottom: 8 }}>
+          {cursor.getFullYear()}년 {cursor.getMonth() + 1}월 지각자
+        </div>
+        {monthlyLateCounts.length === 0 ? (
+          <div style={{ fontSize: 12.5, color: COLORS.sub }}>이번 달 지각 기록이 없습니다.</div>
+        ) : (
+          <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+            {monthlyLateCounts.map(([name, count]) => (
+              <span
+                key={name}
+                style={{
+                  fontSize: 12.5, fontWeight: 600, padding: "4px 10px", borderRadius: 6,
+                  background: STATUS_COLORS.지각.bg, color: STATUS_COLORS.지각.fg,
+                }}
+              >
+                {name} 누적 {count}회
+              </span>
+            ))}
+          </div>
+        )}
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6 }}>
