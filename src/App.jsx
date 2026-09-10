@@ -166,6 +166,33 @@ function computeMetrics(record, employee) {
   return { late, otRaw, otCredited };
 }
 
+const STATUS_LABELS = { 지각: "지각", 늦출: "늦출", 일퇴: "일퇴", OFF: "OFF", 출근: "출근" };
+const STATUS_COLORS = {
+  지각: { bg: "#FBEAE6", fg: "#B4432F" },
+  늦출: { bg: "#E4F0EE", fg: "#0F5C55" },
+  일퇴: { bg: "#FBF1DC", fg: "#B8860B" },
+  OFF: { bg: "#EDEFEE", fg: "#5E6C68" },
+  출근: { bg: "#E4F0EE", fg: "#0A3E3A" },
+};
+
+/* 특정 직원의 특정 날짜 상태를 계산: 수동 기록(override)이 있으면 그걸 우선 사용,
+   없으면 원본 근태 데이터로부터 자동 산출 (일퇴는 자동 감지하지 않음 — 순수 수동 카테고리) */
+function computeDayStatus(employee, dateISO, record, override) {
+  if (override) {
+    return { status: override.status, source: "manual", checkin: override.checkin, checkout: override.checkout, note: override.note };
+  }
+  const dow = new Date(dateISO + "T00:00:00").getDay();
+  const sched = SCHEDULE[dow];
+  if (!sched) return { status: "OFF", source: "auto", checkin: "", checkout: "" };
+  if (!record || !record.checkin) return { status: "OFF", source: "auto", checkin: "", checkout: "" };
+
+  const m = computeMetrics(record, employee);
+  if (m.late > 0) {
+    return { status: record.excused ? "늦출" : "지각", source: "auto", checkin: record.checkin, checkout: record.checkout };
+  }
+  return { status: "출근", source: "auto", checkin: record.checkin, checkout: record.checkout };
+}
+
 /* ───────────────────────── xlsx parsing ───────────────────────── */
 
 function parseCapsWorkbook(arrayBuffer) {
@@ -248,6 +275,7 @@ export default function App() {
   const [attendance, setAttendance] = useState(null); // flat array of raw records
   const [ledger, setLedger] = useState(null);
   const [uploadLog, setUploadLog] = useState(null);
+  const [dayStatusOverrides, setDayStatusOverrides] = useState(null); // flat array, manual calendar overrides
 
   const [tab, setTab] = useState("dashboard");
   const [asOf, setAsOf] = useState(toISO(new Date()));
@@ -355,12 +383,33 @@ export default function App() {
     );
   }, []);
 
+  const fetchDayStatus = useCallback(async () => {
+    const { data, error: err } = await supabase.from("day_status").select("*");
+    if (err) {
+      console.error("day_status fetch error:", err);
+      setError(`캘린더 수동 기록을 불러오지 못했습니다: ${err.message}`);
+      setDayStatusOverrides((prev) => prev || []);
+      return;
+    }
+    setDayStatusOverrides(
+      (data || []).map((r) => ({
+        employeeId: r.employee_id,
+        date: r.date,
+        status: r.status,
+        checkin: r.checkin || "",
+        checkout: r.checkout || "",
+        note: r.note || "",
+      }))
+    );
+  }, []);
+
   function retryAll() {
     setError("");
     fetchEmployees();
     fetchAttendance();
     fetchLedger();
     fetchUploadLog();
+    fetchDayStatus();
   }
 
   useEffect(() => {
@@ -386,6 +435,7 @@ export default function App() {
     fetchAttendance();
     fetchLedger();
     fetchUploadLog();
+    fetchDayStatus();
 
     const channel = supabase
       .channel("dod-attendance-sync")
@@ -393,12 +443,13 @@ export default function App() {
       .on("postgres_changes", { event: "*", schema: "public", table: "attendance" }, fetchAttendance)
       .on("postgres_changes", { event: "*", schema: "public", table: "ledger" }, fetchLedger)
       .on("postgres_changes", { event: "*", schema: "public", table: "upload_log" }, fetchUploadLog)
+      .on("postgres_changes", { event: "*", schema: "public", table: "day_status" }, fetchDayStatus)
       .subscribe();
 
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [configOk, fetchEmployees, fetchAttendance, fetchLedger, fetchUploadLog]);
+  }, [configOk, fetchEmployees, fetchAttendance, fetchLedger, fetchUploadLog, fetchDayStatus]);
 
   /* ---- employees ---- */
   async function addEmployee() {
@@ -477,6 +528,51 @@ export default function App() {
     const { error: err } = await supabase.from("ledger").delete().eq("id", `LATE_${employeeId}_${date}`);
     if (err) setError(`차감 기록 삭제 실패: ${err.message}`);
     else fetchLedger();
+  }
+
+  /* 일퇴(조기퇴근 희망)는 순수 수동 카테고리 — 캘린더에서 직접 시간차감 설정 */
+  async function setEarlyLeaveDeduction(employeeId, date, ledgerType, minutes, note) {
+    if (!requireAuth()) return;
+    const ledgerRow = {
+      id: `EARLY_${employeeId}_${date}`,
+      employee_id: employeeId,
+      type: ledgerType,
+      direction: "use",
+      minutes: Math.abs(parseInt(minutes, 10) || 0),
+      date,
+      note: note || "일퇴(조기퇴근) 시간차감",
+    };
+    const { error: err } = await supabase.from("ledger").upsert(ledgerRow, { onConflict: "id" });
+    if (err) setError(`차감 기록 저장 실패: ${err.message}`);
+    else fetchLedger();
+  }
+  async function removeEarlyLeaveDeduction(employeeId, date) {
+    if (!requireAuth()) return;
+    const { error: err } = await supabase.from("ledger").delete().eq("id", `EARLY_${employeeId}_${date}`);
+    if (err) setError(`차감 기록 삭제 실패: ${err.message}`);
+    else fetchLedger();
+  }
+
+  /* ---- 캘린더 수동 상태 설정(일퇴/OFF/출근 등, 원본 데이터가 없거나 강제로 표시를 바꾸고 싶을 때) ---- */
+  async function setDayStatus(employeeId, date, status, checkin, checkout, note) {
+    if (!requireAuth()) return;
+    const row = {
+      employee_id: employeeId,
+      date,
+      status,
+      checkin: checkin || null,
+      checkout: checkout || null,
+      note: note || null,
+    };
+    const { error: err } = await supabase.from("day_status").upsert(row, { onConflict: "employee_id,date" });
+    if (err) setError(`캘린더 상태 저장 실패: ${err.message}`);
+    else fetchDayStatus();
+  }
+  async function removeDayStatus(employeeId, date) {
+    if (!requireAuth()) return;
+    const { error: err } = await supabase.from("day_status").delete().eq("employee_id", employeeId).eq("date", date);
+    if (err) setError(`캘린더 상태 삭제 실패: ${err.message}`);
+    else fetchDayStatus();
   }
   async function deleteMonthData(month) {
     if (!requireAuth()) return;
@@ -628,28 +724,6 @@ export default function App() {
     return Object.entries(map).sort((a, b) => b[0].localeCompare(a[0]));
   }, [attendance]);
 
-  const lateRecords = useMemo(() => {
-    if (!employees || !attendance) return [];
-    const out = [];
-    attendance.forEach((r) => {
-      const emp = employees.find((e) => e.id === r.employeeId || e.name === r.employeeName);
-      if (!emp) return;
-      const m = computeMetrics(r, emp);
-      if (m.late > 0) {
-        out.push({
-          rawEmployeeId: r.employeeId,
-          employeeCanonicalId: emp.id,
-          employeeName: emp.name,
-          team: emp.team || "미지정",
-          date: r.date,
-          lateMinutes: m.late,
-          excused: !!r.excused,
-        });
-      }
-    });
-    return out.sort((a, b) => (a.date < b.date ? 1 : -1));
-  }, [employees, attendance]);
-
   const summaryRows = useMemo(() => {
     if (!employees || !ledger || !attendance) return [];
     return employees.map((emp) => {
@@ -755,7 +829,7 @@ export default function App() {
     );
   }
 
-  if (!employees || !attendance || !ledger || !uploadLog) {
+  if (!employees || !attendance || !ledger || !uploadLog || !dayStatusOverrides) {
     return (
       <div style={{ padding: 40, fontFamily: FONT }}>
         <div style={{ color: COLORS.sub, marginBottom: 12 }}>불러오는 중...</div>
@@ -844,7 +918,7 @@ export default function App() {
         <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           {[
             ["dashboard", "대시보드"],
-            ["late", "지각 상세"],
+            ["calendar", "캘린더"],
             ["upload", "데이터 업로드"],
             ["ledger", "연차·OT 사용내역"],
             ["employees", "직원 관리"],
@@ -872,13 +946,19 @@ export default function App() {
       {tab === "dashboard" && (
         <DashboardTab groupedByTeam={groupedByTeam} collapsed={collapsed} toggleTeam={toggleTeam} onSelect={setSelectedId} />
       )}
-      {tab === "late" && (
-        <LateDetailTab
-          lateRecords={lateRecords}
+      {tab === "calendar" && (
+        <CalendarTab
+          employees={employees}
+          attendance={attendance}
+          dayStatusOverrides={dayStatusOverrides}
           ledger={ledger}
           setLateExcused={setLateExcused}
           setLateDeduction={setLateDeduction}
           removeLateDeduction={removeLateDeduction}
+          setEarlyLeaveDeduction={setEarlyLeaveDeduction}
+          removeEarlyLeaveDeduction={removeEarlyLeaveDeduction}
+          setDayStatus={setDayStatus}
+          removeDayStatus={removeDayStatus}
         />
       )}
       {tab === "upload" && (
@@ -934,10 +1014,6 @@ export default function App() {
       {selectedId && (
         <EmployeeDetailModal
           row={summaryRows.find((r) => r.id === selectedId)}
-          lateRecords={lateRecords}
-          setLateExcused={setLateExcused}
-          setLateDeduction={setLateDeduction}
-          removeLateDeduction={removeLateDeduction}
           ledger={ledger}
           removeLedgerEntry={removeLedgerEntry}
           insertLedgerEntry={insertLedgerEntry}
@@ -1183,8 +1259,7 @@ function WeeklyScheduleEditor({ employee, updateEmployee }) {
 }
 
 function EmployeeDetailModal({
-  row, lateRecords, setLateExcused, setLateDeduction, removeLateDeduction,
-  ledger, removeLedgerEntry, insertLedgerEntry, grantDaehyu,
+  row, ledger, removeLedgerEntry, insertLedgerEntry, grantDaehyu,
   updateEmployee, removeEmployee, onClose,
 }) {
   const [expandedStat, setExpandedStat] = useState(null); // null | 'ot' | 'leave' | 'daehyu'
@@ -1196,7 +1271,6 @@ function EmployeeDetailModal({
   const leaveLow = row.leaveRemaining <= DAY_MINUTES * 2 && row.leaveRemaining >= 0;
   const leaveNeg = row.leaveRemaining < 0;
   const teamColor = TEAM_COLORS[row.team] || COLORS.tealDark;
-  const personLateRecords = (lateRecords || []).filter((r) => r.employeeCanonicalId === row.id);
   const statHistory = (ledger || [])
     .filter((l) => l.employeeId === row.id && l.type === expandedStat)
     .sort((a, b) => (a.date < b.date ? 1 : -1));
@@ -1389,20 +1463,11 @@ function EmployeeDetailModal({
             </label>
           </div>
 
-          <div style={{ fontSize: 13, fontWeight: 700, color: COLORS.tealDark, marginBottom: 10 }}>지각 히스토리</div>
           <div style={{ fontSize: 12, color: COLORS.sub, marginBottom: 8 }}>
-            여기서 바로 차감 처리하거나 되돌릴 수 있습니다. 근무시간 예외 설정은 직원 관리 탭에서 계속 수정할 수 있어요.
+            지각/늦출/일퇴 등 일자별 기록은 캘린더 탭에서 확인하고 수정할 수 있어요.
           </div>
-          <LateRecordsTable
-            records={personLateRecords}
-            ledger={ledger}
-            setLateExcused={setLateExcused}
-            setLateDeduction={setLateDeduction}
-            removeLateDeduction={removeLateDeduction}
-            showNameTeam={false}
-          />
 
-          <div style={{ marginTop: 20, borderTop: `1px solid ${COLORS.border}`, paddingTop: 14 }}>
+          <div style={{ marginTop: 6, borderTop: `1px solid ${COLORS.border}`, paddingTop: 14 }}>
             <button
               className="btn"
               style={{ background: COLORS.redSoft, color: COLORS.red }}
@@ -1436,158 +1501,340 @@ function Badge({ text, tone }) {
   );
 }
 
-function LateRecordsTable({ records, ledger, setLateExcused, setLateDeduction, removeLateDeduction, showNameTeam = true }) {
-  const [editingKey, setEditingKey] = useState(null);
-  const [editType, setEditType] = useState("ot");
-  const [editMinutes, setEditMinutes] = useState("");
+function CalendarTab({ employees, attendance, dayStatusOverrides, ledger, setLateExcused, setLateDeduction, removeLateDeduction, setEarlyLeaveDeduction, removeEarlyLeaveDeduction, setDayStatus, removeDayStatus }) {
+  const [cursor, setCursor] = useState(() => {
+    const d = new Date();
+    return new Date(d.getFullYear(), d.getMonth(), 1);
+  });
+  const [selectedDate, setSelectedDate] = useState(null);
 
-  function findDeduction(r) {
-    return (ledger || []).find((l) => l.id === `LATE_${r.rawEmployeeId}_${r.date}`);
-  }
-  function startEdit(r, existing) {
-    const key = `${r.rawEmployeeId}_${r.date}`;
-    setEditingKey(key);
-    setEditType(existing ? existing.type : "ot");
-    setEditMinutes(String(existing ? existing.minutes : r.lateMinutes));
-  }
-  function confirmDeduction(r) {
-    setLateDeduction(r.rawEmployeeId, r.date, editType, editMinutes, "지각 시간차감");
-    setEditingKey(null);
+  const attendanceIndex = useMemo(() => {
+    const idx = {};
+    attendance.forEach((r) => {
+      const emp = employees.find((e) => e.id === r.employeeId || e.name === r.employeeName);
+      if (!emp) return;
+      idx[`${emp.id}_${r.date}`] = r;
+    });
+    return idx;
+  }, [attendance, employees]);
+
+  const overrideIndex = useMemo(() => {
+    const idx = {};
+    dayStatusOverrides.forEach((o) => {
+      idx[`${o.employeeId}_${o.date}`] = o;
+    });
+    return idx;
+  }, [dayStatusOverrides]);
+
+  const cells = useMemo(() => {
+    const year = cursor.getFullYear();
+    const month = cursor.getMonth();
+    const daysInMonth = new Date(year, month + 1, 0).getDate();
+    const startDow = new Date(year, month, 1).getDay();
+    const out = [];
+    for (let i = 0; i < startDow; i++) out.push(null);
+    for (let d = 1; d <= daysInMonth; d++) {
+      const dateISO = `${year}-${pad(month + 1)}-${pad(d)}`;
+      const people = [];
+      employees.forEach((emp) => {
+        const key = `${emp.id}_${dateISO}`;
+        const st = computeDayStatus(emp, dateISO, attendanceIndex[key], overrideIndex[key]);
+        if (st.source === "manual" || (st.status !== "출근" && st.status !== "OFF")) {
+          people.push({ employeeId: emp.id, name: emp.name, ...st });
+        }
+      });
+      out.push({ date: dateISO, day: d, people });
+    }
+    return out;
+  }, [cursor, employees, attendanceIndex, overrideIndex]);
+
+  function goMonth(delta) {
+    setCursor(new Date(cursor.getFullYear(), cursor.getMonth() + delta, 1));
   }
 
   return (
-    <table>
-      <thead style={{ background: COLORS.tealSoft }}>
-        <tr>
-          {showNameTeam && <th>이름</th>}
-          {showNameTeam && <th>팀</th>}
-          <th>날짜</th>
-          <th>지각시간</th>
-          <th>상태</th>
-          <th>차감 설정</th>
-        </tr>
-      </thead>
-      <tbody>
-        {records.length === 0 && (
-          <tr>
-            <td colSpan={showNameTeam ? 6 : 4} style={{ textAlign: "center", color: COLORS.sub, padding: 20 }}>
-              지각 기록이 없습니다.
-            </td>
-          </tr>
-        )}
-        {records.map((r) => {
-          const key = `${r.rawEmployeeId}_${r.date}`;
-          const isEditing = editingKey === key;
-          const deduction = findDeduction(r);
-          return (
-            <tr key={key}>
-              {showNameTeam && <td style={{ fontWeight: 600 }}>{r.employeeName}</td>}
-              {showNameTeam && <td style={{ color: COLORS.sub }}>{r.team}</td>}
-              <td>{fmtDate(r.date)}</td>
-              <td>{r.lateMinutes}분</td>
-              <td>
-                <select
-                  className="input"
-                  style={{ padding: "4px 6px", fontSize: 12.5, fontWeight: 700, color: r.excused ? COLORS.teal : COLORS.red }}
-                  value={r.excused ? "excused" : "late"}
-                  onChange={(e) => setLateExcused(r.rawEmployeeId, r.date, e.target.value === "excused")}
-                >
-                  <option value="late">지각</option>
-                  <option value="excused">늦출</option>
-                </select>
-              </td>
-              <td>
-                {isEditing ? (
-                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                    <select className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={editType} onChange={(e) => setEditType(e.target.value)}>
-                      <option value="ot">OT에서 차감</option>
-                      <option value="leave">연차에서 차감</option>
-                    </select>
-                    <input
-                      type="number"
-                      className="input"
-                      style={{ padding: "4px 6px", fontSize: 12.5, width: 70 }}
-                      value={editMinutes}
-                      onChange={(e) => setEditMinutes(e.target.value)}
-                    />
-                    <span style={{ fontSize: 12, color: COLORS.sub }}>분</span>
-                    <button className="btn" style={{ background: COLORS.teal, color: "#fff", padding: "4px 10px" }} onClick={() => confirmDeduction(r)}>확인</button>
-                    <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px" }} onClick={() => setEditingKey(null)}>취소</button>
-                  </div>
-                ) : deduction ? (
-                  <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
-                    <span style={{ fontSize: 12.5 }}>
-                      {deduction.type === "ot" ? "OT" : "연차"} {deduction.minutes}분 차감
-                    </span>
-                    <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "3px 8px", fontSize: 12 }} onClick={() => startEdit(r, deduction)}>수정</button>
-                    <button className="btn" style={{ background: "transparent", color: COLORS.red, padding: "3px 8px", fontSize: 12 }} onClick={() => removeLateDeduction(r.rawEmployeeId, r.date)}>삭제</button>
-                  </div>
-                ) : (
-                  <button className="btn" style={{ background: COLORS.tealSoft, color: COLORS.tealDark, padding: "4px 10px" }} onClick={() => startEdit(r, null)}>
-                    차감 설정
-                  </button>
+    <>
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <button className="btn" style={{ background: COLORS.tealSoft, color: COLORS.tealDark }} onClick={() => goMonth(-1)}>‹ 이전달</button>
+          <div style={{ fontSize: 16, fontWeight: 800, color: COLORS.tealDark }}>
+            {cursor.getFullYear()}년 {cursor.getMonth() + 1}월
+          </div>
+          <button className="btn" style={{ background: COLORS.tealSoft, color: COLORS.tealDark }} onClick={() => goMonth(1)}>다음달 ›</button>
+        </div>
+      </div>
+
+      <div style={{ display: "grid", gridTemplateColumns: "repeat(7, 1fr)", gap: 6 }}>
+        {["일", "월", "화", "수", "목", "금", "토"].map((d) => (
+          <div key={d} style={{ textAlign: "center", fontSize: 12, fontWeight: 700, color: COLORS.sub, padding: "4px 0" }}>
+            {d}
+          </div>
+        ))}
+        {cells.map((cell, i) =>
+          cell === null ? (
+            <div key={`b${i}`} />
+          ) : (
+            <div
+              key={cell.date}
+              onClick={() => setSelectedDate(cell.date)}
+              style={{
+                background: COLORS.card, border: `1px solid ${COLORS.border}`, borderRadius: 8,
+                minHeight: 92, padding: 6, cursor: "pointer", display: "flex", flexDirection: "column", gap: 3,
+              }}
+            >
+              <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                <span style={{ fontSize: 12.5, fontWeight: 700, color: COLORS.text }}>{cell.day}</span>
+                {cell.people.length > 0 && (
+                  <span style={{ fontSize: 10.5, color: COLORS.sub }}>{cell.people.length}</span>
                 )}
-              </td>
-            </tr>
-          );
-        })}
-      </tbody>
-    </table>
+              </div>
+              {cell.people.slice(0, 4).map((p) => {
+                const c = STATUS_COLORS[p.status] || STATUS_COLORS.OFF;
+                return (
+                  <div
+                    key={p.employeeId}
+                    style={{
+                      fontSize: 10.5, padding: "1px 5px", borderRadius: 4, background: c.bg, color: c.fg,
+                      whiteSpace: "nowrap", overflow: "hidden", textOverflow: "ellipsis", fontWeight: 600,
+                    }}
+                  >
+                    {p.name} {p.status}
+                  </div>
+                );
+              })}
+              {cell.people.length > 4 && (
+                <div style={{ fontSize: 10, color: COLORS.sub }}>+{cell.people.length - 4}명</div>
+              )}
+            </div>
+          )
+        )}
+      </div>
+
+      <div style={{ display: "flex", gap: 12, marginTop: 14, flexWrap: "wrap" }}>
+        {Object.keys(STATUS_COLORS).map((s) => (
+          <div key={s} style={{ display: "flex", alignItems: "center", gap: 5, fontSize: 12, color: COLORS.sub }}>
+            <span style={{ width: 10, height: 10, borderRadius: 3, background: STATUS_COLORS[s].bg, border: `1px solid ${STATUS_COLORS[s].fg}` }} />
+            {s}
+          </div>
+        ))}
+      </div>
+
+      {selectedDate && (
+        <DayDetailModal
+          date={selectedDate}
+          employees={employees}
+          attendanceIndex={attendanceIndex}
+          overrideIndex={overrideIndex}
+          ledger={ledger}
+          setLateExcused={setLateExcused}
+          setLateDeduction={setLateDeduction}
+          removeLateDeduction={removeLateDeduction}
+          setEarlyLeaveDeduction={setEarlyLeaveDeduction}
+          removeEarlyLeaveDeduction={removeEarlyLeaveDeduction}
+          setDayStatus={setDayStatus}
+          removeDayStatus={removeDayStatus}
+          onClose={() => setSelectedDate(null)}
+        />
+      )}
+    </>
   );
 }
 
-function LateDetailTab({ lateRecords, ledger, setLateExcused, setLateDeduction, removeLateDeduction }) {
-  const [query, setQuery] = useState("");
-  const [empFilter, setEmpFilter] = useState("");
+function DayDetailModal({
+  date, employees, attendanceIndex, overrideIndex, ledger,
+  setLateExcused, setLateDeduction, removeLateDeduction,
+  setEarlyLeaveDeduction, removeEarlyLeaveDeduction,
+  setDayStatus, removeDayStatus, onClose,
+}) {
+  const [showAdd, setShowAdd] = useState(false);
+  const [addEmp, setAddEmp] = useState("");
+  const [addStatus, setAddStatus] = useState("일퇴");
+  const [addCheckin, setAddCheckin] = useState("");
+  const [addCheckout, setAddCheckout] = useState("");
+  const [addNote, setAddNote] = useState("");
 
-  const employeeOptions = useMemo(() => {
-    const names = new Map();
-    lateRecords.forEach((r) => names.set(r.employeeCanonicalId, r.employeeName));
-    return Array.from(names.entries()).sort((a, b) => a[1].localeCompare(b[1]));
-  }, [lateRecords]);
+  const [dedEditKey, setDedEditKey] = useState(null);
+  const [dedType, setDedType] = useState("ot");
+  const [dedMinutes, setDedMinutes] = useState("");
 
-  const filtered = useMemo(() => {
-    return lateRecords.filter((r) => {
-      if (empFilter && r.employeeCanonicalId !== empFilter) return false;
-      if (query && !r.employeeName.includes(query)) return false;
-      return true;
-    });
-  }, [lateRecords, empFilter, query]);
+  const rows = useMemo(() => {
+    return employees
+      .map((emp) => {
+        const key = `${emp.id}_${date}`;
+        const rec = attendanceIndex[key];
+        const override = overrideIndex[key];
+        const st = computeDayStatus(emp, date, rec, override);
+        return { emp, rec, override, ...st };
+      })
+      .filter((r) => r.source === "manual" || (r.status !== "출근" && r.status !== "OFF"))
+      .sort((a, b) => a.emp.name.localeCompare(b.emp.name));
+  }, [employees, attendanceIndex, overrideIndex, date]);
+
+  // 지각/늦출은 실제 출퇴근 기록에 연결된 LATE_ 차감을 그대로 쓰고,
+  // 일퇴는 원본 데이터가 없는 순수 수동 카테고리라 EARLY_ 차감을 별도로 관리
+  function dedInfo(row) {
+    if ((row.status === "지각" || row.status === "늦출") && row.rec) {
+      return { id: `LATE_${row.rec.employeeId}_${date}`, set: setLateDeduction, remove: removeLateDeduction, targetId: row.rec.employeeId };
+    }
+    if (row.status === "일퇴") {
+      return { id: `EARLY_${row.emp.id}_${date}`, set: setEarlyLeaveDeduction, remove: removeEarlyLeaveDeduction, targetId: row.emp.id };
+    }
+    return null;
+  }
+
+  function changeStatus(row, newStatus) {
+    if ((newStatus === "지각" || newStatus === "늦출") && row.rec) {
+      removeDayStatus(row.emp.id, date);
+      setLateExcused(row.rec.employeeId, date, newStatus === "늦출");
+    } else {
+      setDayStatus(row.emp.id, date, newStatus, row.checkin, row.checkout, row.note);
+    }
+  }
+
+  function submitAdd() {
+    if (!addEmp) return;
+    setDayStatus(addEmp, date, addStatus, addCheckin, addCheckout, addNote);
+    setShowAdd(false);
+    setAddEmp("");
+    setAddCheckin("");
+    setAddCheckout("");
+    setAddNote("");
+  }
+
+  function startDedEdit(row) {
+    const info = dedInfo(row);
+    if (!info) return;
+    setDedEditKey(info.id);
+    const existing = (ledger || []).find((l) => l.id === info.id);
+    setDedType(existing ? existing.type : "ot");
+    setDedMinutes(String(existing ? existing.minutes : ""));
+  }
+
+  const dow = new Date(date + "T00:00:00").getDay();
+  const weekdayLabel = ["일", "월", "화", "수", "목", "금", "토"][dow];
 
   return (
-    <div className="card" style={{ overflow: "auto" }}>
-      <div style={{ fontSize: 12, color: COLORS.sub, marginBottom: 10 }}>
-        지각으로 잡힌 출근 기록 목록입니다. 사전에 승인되어 연차/OT로 시간차감 처리된 건은 "차감 처리"를
-        눌러주세요 — 대시보드의 지각 횟수·시간 집계에서 빠지고, 선택한 만큼 연차 또는 OT에서 차감됩니다.
-      </div>
-      <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 14 }}>
-        <input
-          className="input"
-          placeholder="이름 검색"
-          value={query}
-          onChange={(e) => setQuery(e.target.value)}
-          style={{ width: 140 }}
-        />
-        <select className="input" value={empFilter} onChange={(e) => setEmpFilter(e.target.value)} style={{ width: 140 }}>
-          <option value="">전체 직원</option>
-          {employeeOptions.map(([id, name]) => (
-            <option key={id} value={id}>{name}</option>
-          ))}
-        </select>
-        {(query || empFilter) && (
-          <button className="btn" style={{ background: "transparent", color: COLORS.sub }} onClick={() => { setQuery(""); setEmpFilter(""); }}>
-            필터 초기화
+    <div
+      onClick={onClose}
+      style={{ position: "fixed", inset: 0, background: "rgba(10,20,18,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 1000, padding: 20 }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{ background: "#fff", borderRadius: 14, width: "100%", maxWidth: 620, maxHeight: "88vh", overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.25)" }}
+      >
+        <div style={{ background: COLORS.tealDark, color: "#fff", padding: "16px 22px", borderRadius: "14px 14px 0 0", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div style={{ fontSize: 18, fontWeight: 800 }}>{fmtDate(date)} ({weekdayLabel})</div>
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: 6, padding: "6px 10px", cursor: "pointer", fontSize: 13 }}>
+            닫기 ✕
           </button>
-        )}
+        </div>
+
+        <div style={{ padding: 20 }}>
+          <button className="btn" style={{ background: COLORS.teal, color: "#fff", marginBottom: 14 }} onClick={() => setShowAdd((v) => !v)}>
+            {showAdd ? "취소" : "+ 추가"}
+          </button>
+
+          {showAdd && (
+            <div style={{ background: COLORS.bg, borderRadius: 8, padding: 12, marginBottom: 16, display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
+              <select className="input" value={addEmp} onChange={(e) => setAddEmp(e.target.value)} style={{ width: 130 }}>
+                <option value="">직원 선택</option>
+                {employees.map((e) => (<option key={e.id} value={e.id}>{e.name}</option>))}
+              </select>
+              <select className="input" value={addStatus} onChange={(e) => setAddStatus(e.target.value)}>
+                {Object.keys(STATUS_LABELS).map((s) => (<option key={s} value={s}>{s}</option>))}
+              </select>
+              <input type="time" className="input" placeholder="출근시간" value={addCheckin} onChange={(e) => setAddCheckin(e.target.value)} />
+              <input type="time" className="input" placeholder="퇴근시간" value={addCheckout} onChange={(e) => setAddCheckout(e.target.value)} />
+              <input className="input" placeholder="메모(선택)" style={{ width: 130 }} value={addNote} onChange={(e) => setAddNote(e.target.value)} />
+              <button className="btn" style={{ background: COLORS.teal, color: "#fff" }} onClick={submitAdd}>저장</button>
+            </div>
+          )}
+
+          <table>
+            <thead style={{ background: COLORS.tealSoft }}>
+              <tr>
+                <th>이름</th>
+                <th>상태</th>
+                <th>출퇴근</th>
+                <th>차감 설정</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 && (
+                <tr>
+                  <td colSpan={5} style={{ textAlign: "center", color: COLORS.sub, padding: 20 }}>
+                    이 날짜에 표시할 기록이 없습니다. "+ 추가"로 기록을 남겨보세요.
+                  </td>
+                </tr>
+              )}
+              {rows.map((row) => {
+                const info = dedInfo(row);
+                const deduction = info ? (ledger || []).find((l) => l.id === info.id) : null;
+                const isDedEditing = info && dedEditKey === info.id;
+                return (
+                  <tr key={row.emp.id}>
+                    <td style={{ fontWeight: 600 }}>{row.emp.name}</td>
+                    <td>
+                      <select
+                        className="input"
+                        style={{ padding: "4px 6px", fontSize: 12.5, fontWeight: 700, color: (STATUS_COLORS[row.status] || {}).fg }}
+                        value={row.status}
+                        onChange={(e) => changeStatus(row, e.target.value)}
+                      >
+                        {Object.keys(STATUS_LABELS).map((s) => (<option key={s} value={s}>{s}</option>))}
+                      </select>
+                    </td>
+                    <td style={{ fontSize: 12.5, color: COLORS.sub }}>
+                      {row.checkin || "-"} ~ {row.checkout || "-"}
+                    </td>
+                    <td>
+                      {!info ? (
+                        <span style={{ color: COLORS.sub, fontSize: 12 }}>-</span>
+                      ) : isDedEditing ? (
+                        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                          <select className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={dedType} onChange={(e) => setDedType(e.target.value)}>
+                            <option value="ot">OT에서 차감</option>
+                            <option value="leave">연차에서 차감</option>
+                          </select>
+                          <input type="number" className="input" style={{ padding: "4px 6px", fontSize: 12.5, width: 60 }} value={dedMinutes} onChange={(e) => setDedMinutes(e.target.value)} />
+                          <span style={{ fontSize: 12, color: COLORS.sub }}>분</span>
+                          <button
+                            className="btn"
+                            style={{ background: COLORS.teal, color: "#fff", padding: "4px 10px" }}
+                            onClick={() => {
+                              info.set(info.targetId, date, dedType, dedMinutes, row.status === "일퇴" ? "일퇴(조기퇴근) 시간차감" : "지각 시간차감");
+                              setDedEditKey(null);
+                            }}
+                          >
+                            확인
+                          </button>
+                          <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px" }} onClick={() => setDedEditKey(null)}>취소</button>
+                        </div>
+                      ) : deduction ? (
+                        <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 12.5 }}>{deduction.type === "ot" ? "OT" : "연차"} {deduction.minutes}분</span>
+                          <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "3px 8px", fontSize: 12 }} onClick={() => startDedEdit(row)}>수정</button>
+                          <button className="btn" style={{ background: "transparent", color: COLORS.red, padding: "3px 8px", fontSize: 12 }} onClick={() => info.remove(info.targetId, date)}>삭제</button>
+                        </div>
+                      ) : (
+                        <button className="btn" style={{ background: COLORS.tealSoft, color: COLORS.tealDark, padding: "4px 10px" }} onClick={() => startDedEdit(row)}>차감 설정</button>
+                      )}
+                    </td>
+                    <td>
+                      {row.source === "manual" && (
+                        <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px", fontSize: 12 }} onClick={() => removeDayStatus(row.emp.id, date)}>
+                          자동으로 되돌리기
+                        </button>
+                      )}
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
       </div>
-      <LateRecordsTable
-        records={filtered}
-        ledger={ledger}
-        setLateExcused={setLateExcused}
-        setLateDeduction={setLateDeduction}
-        removeLateDeduction={removeLateDeduction}
-        showNameTeam
-      />
     </div>
   );
 }
