@@ -188,22 +188,26 @@ function offDayMinutes(dow, employee) {
   return Math.max(0, raw - 90);
 }
 
-/* 특정 직원의 특정 날짜 상태를 계산: 수동 기록(override)이 있으면 그걸 우선 사용,
-   없으면 원본 근태 데이터로부터 자동 산출 (일퇴/OFF/출근은 자동 감지하지 않음 — 순수 수동 카테고리) */
-function computeDayStatus(employee, dateISO, record, override) {
-  if (override) {
-    return { status: override.status, source: "manual", minutes: override.minutes, note: override.note };
-  }
+/* 특정 직원의 특정 날짜에 적용되는 모든 항목을 배열로 계산.
+   실제 근태(지각/늦출)와 수동 기록(반차/일퇴/OFF/출근 등)은 서로 배타적이지 않고 같은 날 함께 존재할 수 있다 —
+   예: 반차를 쓴 날 남은 근무시간에 늦게 출근한 경우, 늦출 + 반차가 동시에 찍힘 */
+function computeDayEntries(employee, dateISO, record, overrides) {
+  const entries = [];
   const dow = new Date(dateISO + "T00:00:00").getDay();
   const sched = SCHEDULE[dow];
-  if (!sched) return { status: "OFF", source: "auto", minutes: null };
-  if (!record || !record.checkin) return { status: "OFF", source: "auto", minutes: null };
-
-  const m = computeMetrics(record, employee);
-  if (m.late > 0) {
-    return { status: record.excused ? "늦출" : "지각", source: "auto", minutes: m.late };
+  if (sched && record && record.checkin) {
+    const m = computeMetrics(record, employee);
+    if (m.late > 0) {
+      entries.push({ kind: "auto", status: record.excused ? "늦출" : "지각", minutes: m.late, rec: record });
+    }
   }
-  return { status: "출근", source: "auto", minutes: null };
+  (overrides || []).forEach((o) => {
+    entries.push({ kind: "manual", status: o.status, minutes: o.minutes, note: o.note, id: o.id });
+  });
+  if (entries.length === 0) {
+    entries.push({ kind: "auto", status: !sched || !record || !record.checkin ? "OFF" : "출근", minutes: null, rec: record || null });
+  }
+  return entries;
 }
 
 /* ───────────────────────── xlsx parsing ───────────────────────── */
@@ -406,6 +410,7 @@ export default function App() {
     }
     setDayStatusOverrides(
       (data || []).map((r) => ({
+        id: r.id,
         employeeId: r.employee_id,
         date: r.date,
         status: r.status,
@@ -542,14 +547,16 @@ export default function App() {
     else fetchLedger();
   }
 
-  /* ---- 캘린더 수동 상태 설정: 일퇴/OFF/출근/(원본 없는) 지각·늦출을 분 단위로 통합 관리 ----
-     day_status에는 표시용 상태+분을, ledger에는 실제 연차/OT 증감을 DAYADJ_ 키로 함께 기록 */
-  async function setDayAdjustment(employeeId, date, status, dedType, minutes, note) {
+  /* ---- 캘린더 수동 상태 설정: 일퇴/OFF/출근/반차/(원본 없는) 지각·늦출을 분 단위로 통합 관리 ----
+     day_status는 이제 (직원,날짜)당 여러 건이 가능 — 하루에 반차+늦출처럼 동시에 여러 항목을 기록할 수 있다.
+     overrideId가 있으면 그 항목을 수정, 없으면 새 항목을 추가한다. */
+  async function setDayAdjustment(overrideId, employeeId, date, status, dedType, minutes, note) {
     if (!requireAuth()) return;
+    const id = overrideId || `DS_${employeeId}_${date}_${Date.now()}`;
     const m = Math.round(Math.abs(parseFloat(minutes)) || 0);
     const { error: err1 } = await supabase
       .from("day_status")
-      .upsert({ employee_id: employeeId, date, status, minutes: m, note: note || null }, { onConflict: "employee_id,date" });
+      .upsert({ id, employee_id: employeeId, date, status, minutes: m, note: note || null }, { onConflict: "id" });
     if (err1) {
       setError(`캘린더 상태 저장 실패: ${err1.message}`);
       return;
@@ -557,7 +564,7 @@ export default function App() {
     if (m > 0) {
       const direction = status === "출근" ? "adjust" : "use";
       const ledgerRow = {
-        id: `DAYADJ_${employeeId}_${date}`,
+        id: `DAYADJ_${id}`,
         employee_id: employeeId,
         type: dedType,
         direction,
@@ -568,18 +575,18 @@ export default function App() {
       const { error: err2 } = await supabase.from("ledger").upsert(ledgerRow, { onConflict: "id" });
       if (err2) setError(`차감 기록 저장 실패: ${err2.message}`);
     } else {
-      await supabase.from("ledger").delete().eq("id", `DAYADJ_${employeeId}_${date}`);
+      await supabase.from("ledger").delete().eq("id", `DAYADJ_${id}`);
     }
     await Promise.all([fetchDayStatus(), fetchLedger()]);
   }
-  async function removeDayAdjustment(employeeId, date) {
+  async function removeDayAdjustment(overrideId) {
     if (!requireAuth()) return;
-    const { error: err } = await supabase.from("day_status").delete().eq("employee_id", employeeId).eq("date", date);
+    const { error: err } = await supabase.from("day_status").delete().eq("id", overrideId);
     if (err) {
       setError(`캘린더 상태 삭제 실패: ${err.message}`);
       return;
     }
-    await supabase.from("ledger").delete().eq("id", `DAYADJ_${employeeId}_${date}`);
+    await supabase.from("ledger").delete().eq("id", `DAYADJ_${overrideId}`);
     await Promise.all([fetchDayStatus(), fetchLedger()]);
   }
   async function deleteMonthData(month) {
@@ -1531,7 +1538,9 @@ function CalendarTab({ employees, attendance, dayStatusOverrides, ledger, setLat
   const overrideIndex = useMemo(() => {
     const idx = {};
     dayStatusOverrides.forEach((o) => {
-      idx[`${o.employeeId}_${o.date}`] = o;
+      const key = `${o.employeeId}_${o.date}`;
+      if (!idx[key]) idx[key] = [];
+      idx[key].push(o);
     });
     return idx;
   }, [dayStatusOverrides]);
@@ -1548,10 +1557,12 @@ function CalendarTab({ employees, attendance, dayStatusOverrides, ledger, setLat
       const people = [];
       employees.forEach((emp) => {
         const key = `${emp.id}_${dateISO}`;
-        const st = computeDayStatus(emp, dateISO, attendanceIndex[key], overrideIndex[key]);
-        if (st.source === "manual" || (st.status !== "출근" && st.status !== "OFF")) {
-          people.push({ employeeId: emp.id, name: emp.name, ...st });
-        }
+        const entries = computeDayEntries(emp, dateISO, attendanceIndex[key], overrideIndex[key]);
+        entries.forEach((entry) => {
+          if (entry.kind === "manual" || (entry.status !== "출근" && entry.status !== "OFF")) {
+            people.push({ employeeId: emp.id, name: emp.name, ...entry });
+          }
+        });
       });
       out.push({ date: dateISO, day: d, people });
     }
@@ -1561,6 +1572,8 @@ function CalendarTab({ employees, attendance, dayStatusOverrides, ledger, setLat
   function goMonth(delta) {
     setCursor(new Date(cursor.getFullYear(), cursor.getMonth() + delta, 1));
   }
+
+  const todayISO = toISO(new Date());
 
   const monthlyLateCounts = useMemo(() => {
     const counts = {};
@@ -1627,18 +1640,29 @@ function CalendarTab({ employees, attendance, dayStatusOverrides, ledger, setLat
               }}
             >
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                <span style={{ fontSize: 12.5, fontWeight: 700, color: COLORS.text }}>{cell.day}</span>
+                <span
+                  style={{
+                    fontSize: 12.5, fontWeight: 700,
+                    color: cell.date === todayISO ? "#fff" : COLORS.text,
+                    background: cell.date === todayISO ? COLORS.red : "transparent",
+                    borderRadius: "50%",
+                    width: 20, height: 20,
+                    display: "inline-flex", alignItems: "center", justifyContent: "center",
+                  }}
+                >
+                  {cell.day}
+                </span>
                 {cell.people.length > 0 && (
                   <span style={{ fontSize: 10, color: COLORS.sub }}>{cell.people.length}</span>
                 )}
               </div>
               <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
-                {cell.people.slice(0, 8).map((p) => {
+                {cell.people.slice(0, 8).map((p, idx) => {
                   const c = STATUS_COLORS[p.status] || STATUS_COLORS.OFF;
                   const showMin = p.minutes && ["지각", "늦출", "일퇴", "반차"].includes(p.status);
                   return (
                     <div
-                      key={p.employeeId}
+                      key={p.id || `${p.employeeId}_${idx}`}
                       style={{
                         fontSize: 10.5, padding: "1px 5px", borderRadius: 4, background: c.bg, color: c.fg,
                         whiteSpace: "nowrap", fontWeight: 600,
@@ -1759,46 +1783,61 @@ function DayDetailModal({
   const [addEmp, setAddEmp] = useState("");
   const [addStatus, setAddStatus] = useState("일퇴");
 
-  const [editingKey, setEditingKey] = useState(null); // employeeId_date currently showing the adjust editor
+  const [editingKey, setEditingKey] = useState(null); // rowKey currently showing the adjust editor
   const [editingStatus, setEditingStatus] = useState(null);
+  const [editingOverrideId, setEditingOverrideId] = useState(null); // null = creating a new entry, else updating this one
+  const [editingEmpId, setEditingEmpId] = useState(null);
 
   const dow = new Date(date + "T00:00:00").getDay();
   const weekdayLabel = ["일", "월", "화", "수", "목", "금", "토"][dow];
 
   const rows = useMemo(() => {
-    return employees
-      .map((emp) => {
-        const key = `${emp.id}_${date}`;
-        const rec = attendanceIndex[key];
-        const override = overrideIndex[key];
-        const st = computeDayStatus(emp, date, rec, override);
-        return { emp, rec, override, ...st };
-      })
-      .filter((r) => r.source === "manual" || (r.status !== "출근" && r.status !== "OFF"))
-      .sort((a, b) => a.emp.name.localeCompare(b.emp.name));
+    const out = [];
+    employees.forEach((emp) => {
+      const key = `${emp.id}_${date}`;
+      const rec = attendanceIndex[key];
+      const overrides = overrideIndex[key];
+      const entries = computeDayEntries(emp, date, rec, overrides);
+      entries.forEach((entry) => {
+        if (entry.kind === "manual" || (entry.status !== "출근" && entry.status !== "OFF")) {
+          out.push({
+            emp,
+            rec: entry.kind === "auto" ? entry.rec : null,
+            source: entry.kind,
+            overrideId: entry.kind === "manual" ? entry.id : null,
+            rowKey: entry.kind === "manual" ? entry.id : `auto_${emp.id}`,
+            status: entry.status,
+            minutes: entry.minutes,
+          });
+        }
+      });
+    });
+    return out.sort((a, b) => a.emp.name.localeCompare(b.emp.name));
   }, [employees, attendanceIndex, overrideIndex, date]);
 
   function changeStatus(row, newStatus) {
-    if ((newStatus === "지각" || newStatus === "늦출") && row.rec) {
-      removeDayAdjustment(row.emp.id, date);
+    if (row.source === "auto" && row.rec && (newStatus === "지각" || newStatus === "늦출")) {
       setLateExcused(row.rec.employeeId, date, newStatus === "늦출");
-      setEditingKey(null);
       return;
     }
-    // 일퇴/OFF/출근, 또는 원본 데이터 없는 지각·늦출은 분 단위 설정이 필요하므로 편집기를 연다
-    setEditingKey(`${row.emp.id}_${date}`);
+    // 반차/일퇴/OFF/출근, 또는 원본 데이터 없는 지각·늦출은 분 단위 설정이 필요하므로 편집기를 연다.
+    // 자동 항목(실제 지각/늦출)을 다른 유형으로 바꾸면 그 자동 항목은 그대로 두고 새 수동 항목을 추가한다.
+    setEditingKey(row.rowKey);
     setEditingStatus(newStatus);
+    setEditingOverrideId(row.source === "manual" ? row.overrideId : null);
+    setEditingEmpId(row.emp.id);
   }
 
-  function saveAdjustment(row, minutes, dedType) {
-    setDayAdjustment(row.emp.id, date, editingStatus, dedType, minutes, "");
+  function saveAdjustment(minutes, dedType) {
+    setDayAdjustment(editingOverrideId, editingEmpId, date, editingStatus, dedType, minutes, "");
     setEditingKey(null);
     setEditingStatus(null);
+    setEditingOverrideId(null);
+    setEditingEmpId(null);
   }
 
   function submitAdd() {
     if (!addEmp) return;
-    const emp = employees.find((e) => e.id === addEmp);
     const key = `${addEmp}_${date}`;
     const rec = attendanceIndex[key];
     if ((addStatus === "지각" || addStatus === "늦출") && rec) {
@@ -1810,7 +1849,7 @@ function DayDetailModal({
     setAddStep("adjust");
   }
 
-  const existingLedgerFor = (row) => (ledger || []).find((l) => l.id === `DAYADJ_${row.emp.id}_${date}`);
+  const existingLedgerFor = (row) => row.overrideId && (ledger || []).find((l) => l.id === `DAYADJ_${row.overrideId}`);
   const existingLateLedgerFor = (row) => row.rec && (ledger || []).find((l) => l.id === `LATE_${row.rec.employeeId}_${date}`);
 
   return (
@@ -1866,7 +1905,7 @@ function DayDetailModal({
                 initialType="ot"
                 autoMinutes={offDayMinutes(dow, employees.find((e) => e.id === addEmp))}
                 onSave={(minutes, dedType) => {
-                  setDayAdjustment(addEmp, date, addStatus, dedType, minutes, "");
+                  setDayAdjustment(null, addEmp, date, addStatus, dedType, minutes, "");
                   setShowAdd(false);
                   setAddEmp("");
                   setAddStep("pick");
@@ -1898,12 +1937,11 @@ function DayDetailModal({
                 </tr>
               )}
               {rows.map((row) => {
-                const key = `${row.emp.id}_${date}`;
-                const isEditing = editingKey === key;
+                const isEditing = editingKey === row.rowKey;
                 const dayLedger = existingLedgerFor(row);
                 const lateLedger = existingLateLedgerFor(row);
                 return (
-                  <React.Fragment key={row.emp.id}>
+                  <React.Fragment key={row.rowKey}>
                     <tr>
                       <td style={{ fontWeight: 600 }}>{row.emp.name}</td>
                       <td>
@@ -1918,7 +1956,13 @@ function DayDetailModal({
                       </td>
                       <td style={{ fontSize: 12.5 }}>
                         {row.status === "지각" || row.status === "늦출" ? (
-                          lateLedger ? `${lateLedger.type === "ot" ? "OT" : "연차"} ${lateLedger.minutes}분 차감` : row.minutes ? `${row.minutes}분 (미차감)` : "-"
+                          lateLedger
+                            ? `${lateLedger.type === "ot" ? "OT" : "연차"} ${lateLedger.minutes}분 차감`
+                            : dayLedger
+                            ? `${dayLedger.type === "ot" ? "OT" : dayLedger.type === "daehyu" ? "대휴" : "연차"} ${dayLedger.minutes}분 차감`
+                            : row.minutes
+                            ? `${row.minutes}분 (미차감)`
+                            : "-"
                         ) : dayLedger ? (
                           `${dayLedger.type === "ot" ? "OT" : dayLedger.type === "daehyu" ? "대휴" : "연차"} ${dayLedger.minutes}분 ${dayLedger.direction === "adjust" ? "가산" : "차감"}`
                         ) : (
@@ -1926,32 +1970,37 @@ function DayDetailModal({
                         )}
                       </td>
                       <td style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-                        {(row.status === "지각" || row.status === "늦출") && row.rec && (
+                        {row.source === "auto" && row.rec && (row.status === "지각" || row.status === "늦출") && (
                           <button
                             className="btn"
                             style={{ background: COLORS.tealSoft, color: COLORS.tealDark, padding: "4px 10px" }}
-                            onClick={() => { setEditingKey(key); setEditingStatus(row.status); }}
+                            onClick={() => setEditingKey(isEditing ? null : row.rowKey)}
                           >
                             {lateLedger ? "차감 수정" : "차감 설정"}
                           </button>
                         )}
-                        {(row.status === "일퇴" || row.status === "반차" || row.status === "OFF" || row.status === "출근" || ((row.status === "지각" || row.status === "늦출") && !row.rec)) && (
+                        {(row.source === "manual" || !row.rec) && (
                           <button
                             className="btn"
                             style={{ background: COLORS.tealSoft, color: COLORS.tealDark, padding: "4px 10px" }}
-                            onClick={() => { setEditingKey(key); setEditingStatus(row.status); }}
+                            onClick={() => {
+                              setEditingKey(row.rowKey);
+                              setEditingStatus(row.status);
+                              setEditingOverrideId(row.overrideId);
+                              setEditingEmpId(row.emp.id);
+                            }}
                           >
                             {dayLedger ? "수정" : "설정"}
                           </button>
                         )}
                         {row.source === "manual" && (
-                          <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px", fontSize: 12 }} onClick={() => removeDayAdjustment(row.emp.id, date)}>
-                            자동으로 되돌리기
+                          <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "4px 8px", fontSize: 12 }} onClick={() => removeDayAdjustment(row.overrideId)}>
+                            이 항목 삭제
                           </button>
                         )}
                       </td>
                     </tr>
-                    {isEditing && (row.status === "지각" || row.status === "늦출") && row.rec && (
+                    {isEditing && row.source === "auto" && row.rec && (row.status === "지각" || row.status === "늦출") && (
                       <tr>
                         <td colSpan={4}>
                           <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", background: COLORS.bg, padding: 8, borderRadius: 6 }}>
@@ -1961,10 +2010,10 @@ function DayDetailModal({
                               style={{ padding: "4px 6px", fontSize: 12.5, width: 70 }}
                               placeholder="분"
                               defaultValue={lateLedger ? lateLedger.minutes : row.minutes || ""}
-                              id={`ded-min-${key}`}
+                              id={`ded-min-${row.rowKey}`}
                             />
                             <span style={{ fontSize: 12, color: COLORS.sub }}>분</span>
-                            <select className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} defaultValue={lateLedger ? lateLedger.type : "ot"} id={`ded-type-${key}`}>
+                            <select className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} defaultValue={lateLedger ? lateLedger.type : "ot"} id={`ded-type-${row.rowKey}`}>
                               <option value="ot">OT에서 차감</option>
                               <option value="leave">연차에서 차감</option>
                             </select>
@@ -1972,8 +2021,8 @@ function DayDetailModal({
                               className="btn"
                               style={{ background: COLORS.teal, color: "#fff", padding: "4px 10px" }}
                               onClick={() => {
-                                const mEl = document.getElementById(`ded-min-${key}`);
-                                const tEl = document.getElementById(`ded-type-${key}`);
+                                const mEl = document.getElementById(`ded-min-${row.rowKey}`);
+                                const tEl = document.getElementById(`ded-type-${row.rowKey}`);
                                 setLateDeduction(row.rec.employeeId, date, tEl.value, mEl.value, "지각 시간차감");
                                 setEditingKey(null);
                               }}
@@ -1985,7 +2034,7 @@ function DayDetailModal({
                         </td>
                       </tr>
                     )}
-                    {isEditing && (row.status === "일퇴" || row.status === "반차" || row.status === "OFF" || row.status === "출근" || ((row.status === "지각" || row.status === "늦출") && !row.rec)) && (
+                    {isEditing && (row.source === "manual" || !row.rec) && (
                       <tr>
                         <td colSpan={4}>
                           <DayAdjustEditor
@@ -1993,7 +2042,7 @@ function DayDetailModal({
                             initialMinutes={dayLedger ? dayLedger.minutes : row.minutes}
                             initialType={dayLedger ? dayLedger.type : "ot"}
                             autoMinutes={offDayMinutes(dow, row.emp)}
-                            onSave={(minutes, dedType) => saveAdjustment(row, minutes, dedType)}
+                            onSave={(minutes, dedType) => saveAdjustment(minutes, dedType)}
                             onCancel={() => setEditingKey(null)}
                           />
                         </td>
