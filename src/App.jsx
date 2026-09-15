@@ -724,6 +724,12 @@ export default function App() {
     if (err) setError(`기록 삭제 실패: ${err.message}`);
     else fetchLedger();
   }
+  async function updateLedgerNote(id, note) {
+    if (!requireAuth()) return;
+    const { error: err } = await supabase.from("ledger").update({ note: note || null }).eq("id", id);
+    if (err) setError(`메모 수정 실패: ${err.message}`);
+    else fetchLedger();
+  }
 
   const employeeMap = useMemo(() => {
     const m = {};
@@ -1030,6 +1036,7 @@ export default function App() {
           row={summaryRows.find((r) => r.id === selectedId)}
           ledger={ledger}
           removeLedgerEntry={removeLedgerEntry}
+          updateLedgerNote={updateLedgerNote}
           insertLedgerEntry={insertLedgerEntry}
           grantDaehyu={grantDaehyu}
           updateEmployee={updateEmployee}
@@ -1277,13 +1284,15 @@ function WeeklyScheduleEditor({ employee, updateEmployee }) {
 }
 
 function EmployeeDetailModal({
-  row, ledger, removeLedgerEntry, insertLedgerEntry, grantDaehyu,
+  row, ledger, removeLedgerEntry, updateLedgerNote, insertLedgerEntry, grantDaehyu,
   updateEmployee, removeEmployee, onClose,
 }) {
   const [expandedStat, setExpandedStat] = useState(null); // null | 'ot' | 'leave' | 'daehyu'
   const [addValue, setAddValue] = useState("");
   const [addDate, setAddDate] = useState(toISO(new Date()));
   const [addNote, setAddNote] = useState("");
+  const [editingNoteId, setEditingNoteId] = useState(null);
+  const [noteDraft, setNoteDraft] = useState("");
   if (!row) return null;
   const otLow = row.otRemaining < 0;
   const leaveLow = row.leaveRemaining <= DAY_MINUTES * 2 && row.leaveRemaining >= 0;
@@ -1446,7 +1455,46 @@ function EmployeeDetailModal({
                       <td style={{ padding: "6px 10px" }}>{fmtDate(l.date)}</td>
                       <td style={{ padding: "6px 10px" }}>{l.direction === "use" ? "사용" : l.direction === "grant" ? "발생" : "조정(+)"}</td>
                       <td style={{ padding: "6px 10px" }}>{l.minutes}분</td>
-                      <td style={{ padding: "6px 10px", color: COLORS.sub }}>{l.note || "-"}</td>
+                      <td style={{ padding: "6px 10px", color: COLORS.sub }}>
+                        {editingNoteId === l.id ? (
+                          <div style={{ display: "flex", gap: 4, alignItems: "center" }}>
+                            <input
+                              className="input"
+                              style={{ padding: "3px 6px", fontSize: 12, width: 140 }}
+                              value={noteDraft}
+                              onChange={(e) => setNoteDraft(e.target.value)}
+                              autoFocus
+                            />
+                            <button
+                              className="btn"
+                              style={{ background: COLORS.teal, color: "#fff", padding: "3px 8px", fontSize: 12 }}
+                              onClick={() => {
+                                updateLedgerNote(l.id, noteDraft);
+                                setEditingNoteId(null);
+                              }}
+                            >
+                              저장
+                            </button>
+                            <button className="btn" style={{ background: "transparent", color: COLORS.sub, padding: "3px 8px", fontSize: 12 }} onClick={() => setEditingNoteId(null)}>
+                              취소
+                            </button>
+                          </div>
+                        ) : (
+                          <span>
+                            {l.note || "-"}{" "}
+                            <button
+                              onClick={() => {
+                                setEditingNoteId(l.id);
+                                setNoteDraft(l.note || "");
+                              }}
+                              title="메모 수정"
+                              style={{ background: "none", border: "none", cursor: "pointer", padding: "0 2px", fontSize: 12, color: COLORS.sub }}
+                            >
+                              ✎
+                            </button>
+                          </span>
+                        )}
+                      </td>
                       <td style={{ padding: "6px 10px" }}>
                         <button className="btn" style={{ background: "transparent", color: COLORS.red, padding: "3px 8px", fontSize: 12 }} onClick={() => removeLedgerEntry(l.id)}>
                           삭제
