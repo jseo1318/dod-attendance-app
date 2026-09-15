@@ -746,7 +746,7 @@ export default function App() {
       const empRecords = attendance.filter(
         (r) => (r.employeeId === emp.id || r.employeeName === emp.name) && r.date <= asOf
       );
-      const empLedger = ledger.filter((l) => l.employeeId === emp.id);
+      const empLedger = ledger.filter((l) => l.employeeId === emp.id && l.date <= asOf);
 
       let totalLateCount = 0;
       let totalLateMinutes = 0;
@@ -935,7 +935,7 @@ export default function App() {
           {[
             ["dashboard", "대시보드"],
             ["calendar", "캘린더"],
-            ["upload", "데이터 업로드"],
+            ["upload", "캡스 엑셀 업로드"],
             ["ledger", "연차·OT 사용내역"],
             ["employees", "직원 관리"],
           ].map(([key, label]) => (
