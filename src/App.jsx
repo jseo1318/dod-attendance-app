@@ -166,11 +166,12 @@ function computeMetrics(record, employee) {
   return { late, otRaw, otCredited };
 }
 
-const STATUS_LABELS = { 지각: "지각", 늦출: "늦출", 일퇴: "일퇴", 반차: "반차", OFF: "OFF", 출근: "출근" };
+const STATUS_LABELS = { 지각: "지각", 늦출: "늦출", 일퇴: "일퇴", 연차: "연차", 반차: "반차", OFF: "OFF", 출근: "출근" };
 const STATUS_COLORS = {
   지각: { bg: "#FBEAE6", fg: "#B4432F" },
   늦출: { bg: "#E4F0EE", fg: "#0F5C55" },
   일퇴: { bg: "#FBF1DC", fg: "#B8860B" },
+  연차: { bg: "#E6E9F5", fg: "#3E4C8C" },
   반차: { bg: "#EDE7F6", fg: "#6B4C93" },
   OFF: { bg: "#EDEFEE", fg: "#5E6C68" },
   출근: { bg: "#E4F0EE", fg: "#0A3E3A" },
@@ -1709,20 +1710,27 @@ function CalendarTab({ employees, attendance, dayStatusOverrides, ledger, setLat
   );
 }
 
-/* 일퇴/OFF/출근/원본없는 지각·늦출의 분 단위 설정 인라인 폼
-   OFF = 그날 기본 근무시간(-90분)만큼 연차 차감 / 출근(쉬는날 나옴) = 대휴 1일(480분) 고정 발생 */
+/* 일퇴/OFF/연차/반차/출근/원본없는 지각·늦출의 분 단위 설정 인라인 폼
+   OFF = 그날 기본 근무시간(-90분)만큼 OT 차감 / 연차 = 같은 시간만큼 연차 차감
+   반차 = 그 절반만큼 연차 차감 / 출근(쉬는날 나옴) = 대휴 1일(480분) 고정 발생 */
 function DayAdjustEditor({ status, initialMinutes, initialType, autoMinutes, onSave, onCancel }) {
-  const isOff = status === "OFF";
+  const isOffOT = status === "OFF";
+  const isOffLeave = status === "연차";
   const isHalfOff = status === "반차";
   const isWork = status === "출근";
-  const isAuto = isOff || isHalfOff || isWork;
+  const isAuto = isOffOT || isOffLeave || isHalfOff || isWork;
   const fixedMinutes = isWork ? DAY_MINUTES : isHalfOff ? Math.round(autoMinutes / 2) : autoMinutes;
   const [minutes, setMinutes] = useState(String(isAuto ? fixedMinutes : initialMinutes || ""));
   const [dedType, setDedType] = useState(initialType || "ot");
 
   return (
     <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", background: COLORS.bg, padding: 8, borderRadius: 6 }}>
-      {isOff && (
+      {isOffOT && (
+        <span style={{ fontSize: 12.5, color: COLORS.sub }}>
+          요일 기본 근무시간 기준 자동 계산: <strong style={{ color: COLORS.text }}>{fixedMinutes}분</strong> OT 차감
+        </span>
+      )}
+      {isOffLeave && (
         <span style={{ fontSize: 12.5, color: COLORS.sub }}>
           요일 기본 근무시간 기준 자동 계산: <strong style={{ color: COLORS.text }}>{fixedMinutes}분</strong> 연차 차감
         </span>
@@ -1760,7 +1768,8 @@ function DayAdjustEditor({ status, initialMinutes, initialType, autoMinutes, onS
         style={{ background: COLORS.teal, color: "#fff", padding: "4px 10px" }}
         onClick={() => {
           if (isWork) onSave(DAY_MINUTES, "daehyu");
-          else if (isOff || isHalfOff) onSave(fixedMinutes, "leave");
+          else if (isOffOT) onSave(fixedMinutes, "ot");
+          else if (isOffLeave || isHalfOff) onSave(fixedMinutes, "leave");
           else onSave(minutes, dedType);
         }}
       >
