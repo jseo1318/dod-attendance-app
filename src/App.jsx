@@ -332,9 +332,29 @@ export default function App() {
     setEmployees((data || []).map(empFromRow));
   }, []);
 
+  /* Supabase는 select("*") 단일 호출 시 기본 1000행까지만 반환한다.
+     데이터가 누적되며 1000행을 넘으면 뒤쪽 데이터가 조용히 잘려나가므로, 전체를 다 받을 때까지 페이지 단위로 이어붙인다. */
+  async function fetchAllRows(table, extra) {
+    let all = [];
+    let from = 0;
+    const pageSize = 1000;
+    for (;;) {
+      let query = supabase.from(table).select("*").range(from, from + pageSize - 1);
+      if (extra) query = extra(query);
+      const { data, error } = await query;
+      if (error) throw error;
+      all = all.concat(data || []);
+      if (!data || data.length < pageSize) break;
+      from += pageSize;
+    }
+    return all;
+  }
+
   const fetchAttendance = useCallback(async () => {
-    const { data, error: err } = await supabase.from("attendance").select("*");
-    if (err) {
+    let data;
+    try {
+      data = await fetchAllRows("attendance");
+    } catch (err) {
       console.error("attendance fetch error:", err);
       setError(`근태 데이터를 불러오지 못했습니다: ${err.message}`);
       setAttendance((prev) => prev || []);
@@ -354,11 +374,10 @@ export default function App() {
   }, []);
 
   const fetchLedger = useCallback(async () => {
-    const { data, error: err } = await supabase
-      .from("ledger")
-      .select("*")
-      .order("created_at", { ascending: false });
-    if (err) {
+    let data;
+    try {
+      data = await fetchAllRows("ledger", (q) => q.order("created_at", { ascending: false }));
+    } catch (err) {
       console.error("ledger fetch error:", err);
       setError(`원장 데이터를 불러오지 못했습니다: ${err.message}`);
       setLedger((prev) => prev || []);
@@ -402,8 +421,10 @@ export default function App() {
   }, []);
 
   const fetchDayStatus = useCallback(async () => {
-    const { data, error: err } = await supabase.from("day_status").select("*");
-    if (err) {
+    let data;
+    try {
+      data = await fetchAllRows("day_status");
+    } catch (err) {
       console.error("day_status fetch error:", err);
       setError(`캘린더 수동 기록을 불러오지 못했습니다: ${err.message}`);
       setDayStatusOverrides((prev) => prev || []);
