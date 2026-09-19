@@ -269,6 +269,7 @@ function empFromRow(row) {
     openingLeaveMinutes: row.opening_leave_minutes || 0,
     openingOTMinutes: row.opening_ot_minutes || 0,
     customSchedule: row.custom_schedule || {},
+    memo: row.memo || "",
     active: row.active !== false,
   };
 }
@@ -282,6 +283,7 @@ function empToRow(e) {
     opening_leave_minutes: e.openingLeaveMinutes || 0,
     opening_ot_minutes: e.openingOTMinutes || 0,
     custom_schedule: e.customSchedule || {},
+    memo: e.memo || null,
     active: e.active !== false,
   };
 }
@@ -583,23 +585,8 @@ export default function App() {
       setError(`캘린더 상태 저장 실패: ${err1.message}`);
       return;
     }
-    if (m > 0) {
-      const direction = status === "출근" ? "adjust" : "use";
-      const ledgerRow = {
-        id: `DAYADJ_${id}`,
-        employee_id: employeeId,
-        type: dedType,
-        direction,
-        minutes: m,
-        date,
-        note: note || `${status} 시간조정`,
-      };
-      const { error: err2 } = await supabase.from("ledger").upsert(ledgerRow, { onConflict: "id" });
-      if (err2) setError(`차감 기록 저장 실패: ${err2.message}`);
-    } else {
-      await supabase.from("ledger").delete().eq("id", `DAYADJ_${id}`);
-    }
-    await Promise.all([fetchDayStatus(), fetchLedger()]);
+    // 캘린더 기록은 표시/기록용이며 실제 연차·OT·대휴 잔여에는 반영하지 않는다 (대시보드 상세카드에서만 실제 차감/가산)
+    await fetchDayStatus();
   }
   async function removeDayAdjustment(overrideId) {
     if (!requireAuth()) return;
@@ -921,6 +908,7 @@ export default function App() {
         .tab.active { color: ${COLORS.tealDark}; border-bottom-color: ${COLORS.teal}; }
         .dropzone { border: 2px dashed ${COLORS.border}; border-radius: 10px; padding: 36px 20px; text-align: center; color: ${COLORS.sub}; cursor: pointer; background: #fff; }
         .dropzone:hover { border-color: ${COLORS.teal}; }
+        .memo-input::placeholder { color: rgba(255,255,255,0.75); }
         .card { background: ${COLORS.card}; border: 1px solid ${COLORS.border}; border-radius: 10px; padding: 16px; }
         .team-header { display: flex; align-items: center; gap: 8px; cursor: pointer; background: ${COLORS.tealDark}; color: #fff; padding: 10px 14px; border-radius: 8px 8px 0 0; font-weight: 700; font-size: 13.5px; user-select: none; }
         .chevron { transition: transform 0.15s ease; display: inline-block; }
@@ -1314,6 +1302,7 @@ function EmployeeDetailModal({
   const [addNote, setAddNote] = useState("");
   const [editingNoteId, setEditingNoteId] = useState(null);
   const [noteDraft, setNoteDraft] = useState("");
+  const [memoDraft, setMemoDraft] = useState(row ? row.memo || "" : "");
   if (!row) return null;
   const otLow = row.otRemaining < 0;
   const leaveLow = row.leaveRemaining <= DAY_MINUTES * 2 && row.leaveRemaining >= 0;
@@ -1379,12 +1368,25 @@ function EmployeeDetailModal({
           maxHeight: "88vh", overflow: "auto", boxShadow: "0 20px 60px rgba(0,0,0,0.25)",
         }}
       >
-        <div style={{ background: teamColor, color: "#fff", padding: "18px 22px", borderRadius: "14px 14px 0 0", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+        <div style={{ background: teamColor, color: "#fff", padding: "18px 22px", borderRadius: "14px 14px 0 0", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
           <div>
             <div style={{ fontSize: 12, opacity: 0.85, marginBottom: 2 }}>{row.team} · {row.position || "직급 미지정"}</div>
             <div style={{ fontSize: 20, fontWeight: 800 }}>{row.name}</div>
           </div>
-          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: 6, padding: "6px 10px", cursor: "pointer", fontSize: 13 }}>
+          <input
+            value={memoDraft}
+            onChange={(e) => setMemoDraft(e.target.value)}
+            onBlur={() => {
+              if (memoDraft !== (row.memo || "")) updateEmployee(row.id, { memo: memoDraft });
+            }}
+            placeholder="특이사항 메모"
+            className="memo-input"
+            style={{
+              flex: 1, minWidth: 0, background: "rgba(255,255,255,0.18)", border: "none", borderRadius: 6,
+              padding: "7px 10px", color: "#fff", fontSize: 12.5, outline: "none",
+            }}
+          />
+          <button onClick={onClose} style={{ background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: 6, padding: "6px 10px", cursor: "pointer", fontSize: 13, flexShrink: 0 }}>
             닫기 ✕
           </button>
         </div>
@@ -1729,7 +1731,6 @@ function CalendarTab({ employees, attendance, dayStatusOverrides, ledger, setLat
               <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
                 {cell.people.slice(0, 8).map((p, idx) => {
                   const c = STATUS_COLORS[p.status] || STATUS_COLORS.OFF;
-                  const showMin = p.minutes && ["지각", "늦출", "일퇴", "반차"].includes(p.status);
                   return (
                     <div
                       key={p.id || `${p.employeeId}_${idx}`}
@@ -1738,7 +1739,7 @@ function CalendarTab({ employees, attendance, dayStatusOverrides, ledger, setLat
                         whiteSpace: "nowrap", fontWeight: 600,
                       }}
                     >
-                      {p.name} {showMin ? `${p.minutes}분 ` : ""}{p.status}
+                      {p.name} {p.status}
                     </div>
                   );
                 })}
@@ -1790,28 +1791,27 @@ function DayAdjustEditor({ status, initialMinutes, initialType, autoMinutes, onS
   const isAuto = isOffOT || isOffLeave || isHalfOff || isWork;
   const fixedMinutes = isWork ? DAY_MINUTES : isHalfOff ? Math.round(autoMinutes / 2) : autoMinutes;
   const [minutes, setMinutes] = useState(String(isAuto ? fixedMinutes : initialMinutes || ""));
-  const [dedType, setDedType] = useState(initialType || "ot");
 
   return (
     <div style={{ display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", background: COLORS.bg, padding: 8, borderRadius: 6 }}>
       {isOffOT && (
         <span style={{ fontSize: 12.5, color: COLORS.sub }}>
-          요일 기본 근무시간 기준 자동 계산: <strong style={{ color: COLORS.text }}>{fixedMinutes}분</strong> OT 차감
+          요일 기본 근무시간 기준 자동 계산: <strong style={{ color: COLORS.text }}>{fixedMinutes}분</strong>
         </span>
       )}
       {isOffLeave && (
         <span style={{ fontSize: 12.5, color: COLORS.sub }}>
-          요일 기본 근무시간 기준 자동 계산: <strong style={{ color: COLORS.text }}>{fixedMinutes}분</strong> 연차 차감
+          요일 기본 근무시간 기준 자동 계산: <strong style={{ color: COLORS.text }}>{fixedMinutes}분</strong>
         </span>
       )}
       {isHalfOff && (
         <span style={{ fontSize: 12.5, color: COLORS.sub }}>
-          반차 규정 기준 자동 계산(하루치 절반): <strong style={{ color: COLORS.text }}>{fixedMinutes}분</strong> 연차 차감
+          반차 규정 기준 자동 계산(하루치 절반): <strong style={{ color: COLORS.text }}>{fixedMinutes}분</strong>
         </span>
       )}
       {isWork && (
         <span style={{ fontSize: 12.5, color: COLORS.sub }}>
-          대휴(대체휴무) <strong style={{ color: COLORS.text }}>1일(480분)</strong> 발생
+          대휴(대체휴무) <strong style={{ color: COLORS.text }}>1일(480분)</strong>
         </span>
       )}
       {!isAuto && (
@@ -1826,10 +1826,6 @@ function DayAdjustEditor({ status, initialMinutes, initialType, autoMinutes, onS
             autoFocus
           />
           <span style={{ fontSize: 12, color: COLORS.sub }}>분</span>
-          <select className="input" style={{ padding: "4px 6px", fontSize: 12.5 }} value={dedType} onChange={(e) => setDedType(e.target.value)}>
-            <option value="ot">OT에서 차감</option>
-            <option value="leave">연차에서 차감</option>
-          </select>
         </>
       )}
       <button
@@ -1839,7 +1835,7 @@ function DayAdjustEditor({ status, initialMinutes, initialType, autoMinutes, onS
           if (isWork) onSave(DAY_MINUTES, "daehyu");
           else if (isOffOT) onSave(fixedMinutes, "ot");
           else if (isOffLeave || isHalfOff) onSave(fixedMinutes, "leave");
-          else onSave(minutes, dedType);
+          else onSave(minutes, "ot");
         }}
       >
         저장
@@ -2002,7 +1998,7 @@ function DayDetailModal({
               <tr>
                 <th>이름</th>
                 <th>상태</th>
-                <th>분 / 차감</th>
+                <th>시간</th>
                 <th></th>
               </tr>
             </thead>
@@ -2016,7 +2012,6 @@ function DayDetailModal({
               )}
               {rows.map((row) => {
                 const isEditing = editingKey === row.rowKey;
-                const dayLedger = existingLedgerFor(row);
                 const lateLedger = existingLateLedgerFor(row);
                 return (
                   <React.Fragment key={row.rowKey}>
@@ -2034,15 +2029,9 @@ function DayDetailModal({
                       </td>
                       <td style={{ fontSize: 12.5 }}>
                         {row.status === "지각" || row.status === "늦출" ? (
-                          lateLedger
-                            ? `${lateLedger.type === "ot" ? "OT" : "연차"} ${lateLedger.minutes}분 차감`
-                            : dayLedger
-                            ? `${dayLedger.type === "ot" ? "OT" : dayLedger.type === "daehyu" ? "대휴" : "연차"} ${dayLedger.minutes}분 차감`
-                            : row.minutes
-                            ? `${row.minutes}분 (미차감)`
-                            : "-"
-                        ) : dayLedger ? (
-                          `${dayLedger.type === "ot" ? "OT" : dayLedger.type === "daehyu" ? "대휴" : "연차"} ${dayLedger.minutes}분 ${dayLedger.direction === "adjust" ? "가산" : "차감"}`
+                          lateLedger ? `${lateLedger.type === "ot" ? "OT" : "연차"} ${lateLedger.minutes}분 차감` : row.minutes ? `${row.minutes}분` : "-"
+                        ) : row.minutes ? (
+                          `${row.minutes}분`
                         ) : (
                           "-"
                         )}
@@ -2068,7 +2057,7 @@ function DayDetailModal({
                               setEditingEmpId(row.emp.id);
                             }}
                           >
-                            {dayLedger ? "수정" : "설정"}
+                            {row.minutes ? "수정" : "설정"}
                           </button>
                         )}
                         {row.source === "manual" && (
@@ -2117,8 +2106,8 @@ function DayDetailModal({
                         <td colSpan={4}>
                           <DayAdjustEditor
                             status={editingStatus}
-                            initialMinutes={dayLedger ? dayLedger.minutes : row.minutes}
-                            initialType={dayLedger ? dayLedger.type : "ot"}
+                            initialMinutes={row.minutes}
+                            initialType="ot"
                             autoMinutes={offDayMinutes(dow, row.emp)}
                             onSave={(minutes, dedType) => saveAdjustment(minutes, dedType)}
                             onCancel={() => setEditingKey(null)}
