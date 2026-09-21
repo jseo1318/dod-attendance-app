@@ -1376,8 +1376,10 @@ function EmployeeDetailModal({
           <input
             value={memoDraft}
             onChange={(e) => setMemoDraft(e.target.value)}
-            onBlur={() => {
-              if (memoDraft !== (row.memo || "")) updateEmployee(row.id, { memo: memoDraft });
+            onKeyDown={(e) => {
+              if (e.key === "Enter" && memoDraft !== (row.memo || "")) {
+                updateEmployee(row.id, { memo: memoDraft });
+              }
             }}
             placeholder="특이사항 메모"
             className="memo-input"
@@ -1386,6 +1388,18 @@ function EmployeeDetailModal({
               padding: "7px 10px", color: "#fff", fontSize: 12.5, outline: "none",
             }}
           />
+          <button
+            onClick={() => updateEmployee(row.id, { memo: memoDraft })}
+            disabled={memoDraft === (row.memo || "")}
+            style={{
+              background: "rgba(255,255,255,0.22)", border: "none", color: "#fff", borderRadius: 6,
+              padding: "7px 12px", cursor: memoDraft === (row.memo || "") ? "default" : "pointer",
+              fontSize: 12.5, fontWeight: 700, flexShrink: 0,
+              opacity: memoDraft === (row.memo || "") ? 0.5 : 1,
+            }}
+          >
+            메모 저장
+          </button>
           <button onClick={onClose} style={{ background: "rgba(255,255,255,0.15)", border: "none", color: "#fff", borderRadius: 6, padding: "6px 10px", cursor: "pointer", fontSize: 13, flexShrink: 0 }}>
             닫기 ✕
           </button>
