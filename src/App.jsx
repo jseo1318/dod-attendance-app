@@ -1320,7 +1320,7 @@ function EmployeeDetailModal({
   function submitUse() {
     if (!addValue) return;
     if (expandedStat === "leave") {
-      insertLedgerEntry({ employeeId: row.id, type: "leave", direction: "use", minutes: Math.round(parseFloat(addValue) * DAY_MINUTES), date: addDate, note: addNote });
+      insertLedgerEntry({ employeeId: row.id, type: "leave", direction: "use", minutes: addValue, date: addDate, note: addNote });
     } else if (expandedStat === "ot") {
       insertLedgerEntry({ employeeId: row.id, type: "ot", direction: "use", minutes: addValue, date: addDate, note: addNote });
     }
@@ -1441,8 +1441,8 @@ function EmployeeDetailModal({
               <div style={{ padding: 10, borderBottom: `1px solid ${COLORS.border}`, display: "flex", gap: 6, flexWrap: "wrap", alignItems: "center", background: "#fafcfb" }}>
                 {expandedStat === "leave" && (
                   <>
-                    <input type="number" step="0.5" className="input" placeholder="일수" style={{ width: 80 }} value={addValue} onChange={(e) => setAddValue(e.target.value)} />
-                    <span style={{ fontSize: 12, color: COLORS.sub }}>일 사용</span>
+                    <input type="number" className="input" placeholder="분" style={{ width: 80 }} value={addValue} onChange={(e) => setAddValue(e.target.value)} />
+                    <span style={{ fontSize: 12, color: COLORS.sub }}>분 사용 (일 환산: {addValue ? minutesToDaysLabel(Math.round(parseFloat(addValue) || 0)) : "0일"})</span>
                     <input type="date" className="input" value={addDate} onChange={(e) => setAddDate(e.target.value)} />
                     <input className="input" placeholder="메모(선택)" style={{ width: 130 }} value={addNote} onChange={(e) => setAddNote(e.target.value)} />
                     <button className="btn" style={{ background: COLORS.teal, color: "#fff" }} onClick={submitUse}>추가</button>
