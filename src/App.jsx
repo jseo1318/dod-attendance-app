@@ -167,6 +167,7 @@ function computeMetrics(record, employee) {
 }
 
 const STATUS_LABELS = { 지각: "지각", 늦출: "늦출", 일퇴: "일퇴", 연차: "연차", 반차: "반차", OFF: "OFF", 출근: "출근" };
+const STATUS_ORDER = Object.keys(STATUS_LABELS);
 const STATUS_COLORS = {
   지각: { bg: "#FBEAE6", fg: "#B4432F" },
   늦출: { bg: "#E4F0EE", fg: "#0F5C55" },
@@ -1650,7 +1651,7 @@ function CalendarTab({ employees, attendance, dayStatusOverrides, ledger, setLat
           }
         });
       });
-      out.push({ date: dateISO, day: d, people });
+      out.push({ date: dateISO, day: d, people: people.sort((a, b) => STATUS_ORDER.indexOf(a.status) - STATUS_ORDER.indexOf(b.status)) });
     }
     return out;
   }, [cursor, employees, attendanceIndex, overrideIndex]);
@@ -1742,23 +1743,23 @@ function CalendarTab({ employees, attendance, dayStatusOverrides, ledger, setLat
                   <span style={{ fontSize: 10, color: COLORS.sub }}>{cell.people.length}</span>
                 )}
               </div>
-              <div style={{ display: "flex", flexWrap: "wrap", gap: 3 }}>
-                {cell.people.slice(0, 8).map((p, idx) => {
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 2 }}>
+                {cell.people.slice(0, 40).map((p, idx) => {
                   const c = STATUS_COLORS[p.status] || STATUS_COLORS.OFF;
                   return (
                     <div
                       key={p.id || `${p.employeeId}_${idx}`}
                       style={{
-                        fontSize: 10.5, padding: "1px 5px", borderRadius: 4, background: c.bg, color: c.fg,
-                        whiteSpace: "nowrap", fontWeight: 600,
+                        fontSize: 9.5, padding: "1px 4px", borderRadius: 3, background: c.bg, color: c.fg,
+                        whiteSpace: "nowrap", fontWeight: 600, lineHeight: 1.5,
                       }}
                     >
                       {p.name} {p.status}
                     </div>
                   );
                 })}
-                {cell.people.length > 8 && (
-                  <div style={{ fontSize: 10, color: COLORS.sub }}>+{cell.people.length - 8}명</div>
+                {cell.people.length > 40 && (
+                  <div style={{ fontSize: 10, color: COLORS.sub }}>+{cell.people.length - 40}명</div>
                 )}
               </div>
             </div>
