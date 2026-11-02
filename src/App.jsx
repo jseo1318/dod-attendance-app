@@ -166,7 +166,7 @@ function computeMetrics(record, employee) {
   return { late, otRaw, otCredited };
 }
 
-const STATUS_LABELS = { 지각: "지각", 늦출: "늦출", 일퇴: "일퇴", 연차: "연차", 반차: "반차", OFF: "OFF", 출근: "출근" };
+const STATUS_LABELS = { 지각: "지각", 늦출: "늦출", 일퇴: "일퇴", 연차: "연차", 반차: "반차", OFF: "OFF", 대휴: "대휴", 출근: "출근" };
 const STATUS_ORDER = Object.keys(STATUS_LABELS);
 const STATUS_COLORS = {
   지각: { bg: "#FBEAE6", fg: "#B4432F" },
@@ -175,6 +175,7 @@ const STATUS_COLORS = {
   연차: { bg: "#E6E9F5", fg: "#3E4C8C" },
   반차: { bg: "#EDE7F6", fg: "#6B4C93" },
   OFF: { bg: "#EDEFEE", fg: "#5E6C68" },
+  대휴: { bg: "#F5E6EE", fg: "#8A4B6B" },
   출근: { bg: "#E4F0EE", fg: "#0A3E3A" },
 };
 
@@ -1803,7 +1804,8 @@ function DayAdjustEditor({ status, initialMinutes, initialType, autoMinutes, onS
   const isOffLeave = status === "연차";
   const isHalfOff = status === "반차";
   const isWork = status === "출근";
-  const isAuto = isOffOT || isOffLeave || isHalfOff || isWork;
+  const isDaehyuOff = status === "대휴";
+  const isAuto = isOffOT || isOffLeave || isHalfOff || isWork || isDaehyuOff;
   const fixedMinutes = isWork ? DAY_MINUTES : isHalfOff ? Math.round(autoMinutes / 2) : autoMinutes;
   const [minutes, setMinutes] = useState(String(isAuto ? fixedMinutes : initialMinutes || ""));
 
@@ -1829,6 +1831,11 @@ function DayAdjustEditor({ status, initialMinutes, initialType, autoMinutes, onS
           대휴(대체휴무) <strong style={{ color: COLORS.text }}>1일(480분)</strong>
         </span>
       )}
+      {isDaehyuOff && (
+        <span style={{ fontSize: 12.5, color: COLORS.sub }}>
+          요일 기본 근무시간 기준 자동 계산: <strong style={{ color: COLORS.text }}>{fixedMinutes}분</strong>
+        </span>
+      )}
       {!isAuto && (
         <>
           <input
@@ -1850,6 +1857,7 @@ function DayAdjustEditor({ status, initialMinutes, initialType, autoMinutes, onS
           if (isWork) onSave(DAY_MINUTES, "daehyu");
           else if (isOffOT) onSave(fixedMinutes, "ot");
           else if (isOffLeave || isHalfOff) onSave(fixedMinutes, "leave");
+          else if (isDaehyuOff) onSave(fixedMinutes, "daehyu");
           else onSave(minutes, "ot");
         }}
       >
