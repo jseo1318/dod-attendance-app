@@ -33,6 +33,7 @@ const SCHEDULE = {
 };
 const OT_MULTIPLIER = 1.5;
 const DAY_MINUTES = 480;
+const DAEHYU_ACCRUAL_MULTIPLIER = 1.5; // 원내 기준: 대휴 1일 발생 시 1.5일 적립 (사용은 1배)
 
 const TEAM_ORDER = ["상담팀", "코디팀", "간호팀", "피부팀", "씨&마", "진료팀", "미지정"];
 const TEAM_COLORS = {
@@ -713,7 +714,7 @@ export default function App() {
 
   /* 대휴(대체휴무): 공휴일 근무로 발생. OT/연차와 동일하게 전부 수동으로 차감/조정 */
   async function grantDaehyu(employeeId, date, note) {
-    await insertLedgerEntry({ employeeId, type: "daehyu", direction: "adjust", minutes: DAY_MINUTES, date, note: note || "대휴 발생(공휴일 근무)" });
+    await insertLedgerEntry({ employeeId, type: "daehyu", direction: "adjust", minutes: Math.round(DAY_MINUTES * DAEHYU_ACCRUAL_MULTIPLIER), date, note: note || "대휴 발생(공휴일 근무, 1일→1.5일 적립)" });
   }
 
   async function addLedgerEntry() {
@@ -1463,7 +1464,7 @@ function EmployeeDetailModal({
                   <>
                     <input type="date" className="input" value={addDate} onChange={(e) => setAddDate(e.target.value)} />
                     <input className="input" placeholder="메모(선택, 예: 8/15 근무)" style={{ width: 150 }} value={addNote} onChange={(e) => setAddNote(e.target.value)} />
-                    <button className="btn" style={{ background: COLORS.teal, color: "#fff" }} onClick={submitDaehyuGrant}>대휴 발생(+1일) 추가</button>
+                    <button className="btn" style={{ background: COLORS.teal, color: "#fff" }} onClick={submitDaehyuGrant}>대휴 발생(1일 → 1.5일 적립) 추가</button>
                     <span style={{ borderLeft: `1px solid ${COLORS.border}`, height: 20, margin: "0 4px" }} />
                     <input type="number" step="0.5" className="input" placeholder="일수" style={{ width: 70 }} value={addValue} onChange={(e) => setAddValue(e.target.value)} />
                     <button className="btn" style={{ background: COLORS.tealSoft, color: COLORS.tealDark }} onClick={submitDaehyuUse}>대휴 사용 추가</button>
